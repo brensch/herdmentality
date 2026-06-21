@@ -1,0 +1,31 @@
+[workspace]
+members = [
+  "crates/core",
+  "crates/protocol",
+  "crates/server",
+  "crates/bot-provider",
+  "crates/web",
+  "crates/simsimd-pure",
+]
+resolver = "2"
+
+[patch.crates-io]
+# Turso currently pulls SimSIMD unconditionally for optional SQL vector functions.
+# Herdcore does not use those functions, but the upstream crate compiles C. This
+# API-compatible safe-Rust implementation keeps the backend build C-free.
+simsimd = { path = "crates/simsimd-pure" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1"
+futures-util = "0.3"
+prost = "0.14.1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.14.6", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14.6"
+uuid = { version = "1", features = ["v4"] }

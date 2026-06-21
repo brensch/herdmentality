@@ -1,0 +1,17 @@
+[package]
+name = "herdcore-protocol"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+transport = ["tonic/transport"]
+
+[dependencies]
+herdcore-core = { path = "../core" }
+prost.workspace = true
+tonic = { workspace = true, default-features = false, features = ["codegen"] }
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"

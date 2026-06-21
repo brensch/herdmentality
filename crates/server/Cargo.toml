@@ -1,0 +1,28 @@
+[package]
+name = "herdcore-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "herdcore-server"
+path = "src/main.rs"
+
+[dependencies]
+async-stream = "0.3"
+anyhow.workspace = true
+futures-util.workspace = true
+herdcore-core = { path = "../core" }
+herdcore-protocol = { path = "../protocol", features = ["transport"] }
+prost.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic = { workspace = true, features = ["transport", "router"] }
+tonic-prost.workspace = true
+tonic-web = "0.14.6"
+tower-http = { version = "0.6", features = ["cors"] }
+turso = { version = "0.6.1", default-features = false, features = ["pure-rust-crypto"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

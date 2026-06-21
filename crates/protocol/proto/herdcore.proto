@@ -1,0 +1,193 @@
+syntax = "proto3";
+
+package herdcore.v1;
+
+service Herdcore {
+  rpc CreateLobby(CreateLobbyRequest) returns (JoinLobbyResponse);
+  rpc JoinLobby(JoinLobbyRequest) returns (JoinLobbyResponse);
+  rpc GetLobby(GetLobbyRequest) returns (PrivateLobbySnapshot);
+  rpc WatchLobby(WatchLobbyRequest) returns (stream LobbyEvent);
+  rpc StartGame(StartGameRequest) returns (LobbySnapshot);
+  rpc SubmitMove(SubmitMoveRequest) returns (SubmitMoveResponse);
+  rpc AddBot(AddBotRequest) returns (AddBotResponse);
+}
+
+service BotProvider {
+  rpc StartBot(StartBotRequest) returns (StartBotResponse);
+}
+
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_UP = 1;
+  ACTION_DOWN = 2;
+  ACTION_LEFT = 3;
+  ACTION_RIGHT = 4;
+  ACTION_STAY = 5;
+}
+
+enum PlayerKind {
+  PLAYER_KIND_UNSPECIFIED = 0;
+  PLAYER_KIND_HUMAN = 1;
+  PLAYER_KIND_BOT = 2;
+}
+
+enum LobbyPhase {
+  LOBBY_PHASE_UNSPECIFIED = 0;
+  LOBBY_PHASE_WAITING = 1;
+  LOBBY_PHASE_PLAYING = 2;
+  LOBBY_PHASE_FINISHED = 3;
+}
+
+enum LobbyEventKind {
+  LOBBY_EVENT_KIND_UNSPECIFIED = 0;
+  LOBBY_EVENT_KIND_SNAPSHOT = 1;
+  LOBBY_EVENT_KIND_LOBBY_UPDATED = 2;
+  LOBBY_EVENT_KIND_GAME_STARTED = 3;
+  LOBBY_EVENT_KIND_TURN_RESOLVED = 4;
+  LOBBY_EVENT_KIND_HEARTBEAT = 5;
+}
+
+message Position {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+message GamePlayerState {
+  uint32 seat = 1;
+  Position dog = 2;
+  repeated Position pen = 3;
+  uint32 score = 4;
+  Action last_action = 5;
+}
+
+message GameState {
+  uint32 layout_version = 1;
+  int32 width = 2;
+  int32 height = 3;
+  uint64 turn = 4;
+  reserved 5, 6;
+  repeated GamePlayerState players = 7;
+  repeated Position sheep = 8;
+  repeated Position rocks = 9;
+  bool game_over = 10;
+  repeated uint32 winners = 11;
+}
+
+message LobbyPlayer {
+  string player_id = 1;
+  string display_name = 2;
+  PlayerKind kind = 3;
+  optional uint32 seat = 4;
+  bool connected = 5;
+  string bot_type_id = 6;
+}
+
+message LobbySnapshot {
+  string lobby_id = 1;
+  string lobby_code = 2;
+  LobbyPhase phase = 3;
+  string host_player_id = 4;
+  uint32 max_players = 5;
+  uint32 turn_seconds = 6;
+  uint64 public_version = 7;
+  uint64 game_id = 8;
+  int64 deadline_unix_ms = 9;
+  repeated LobbyPlayer players = 10;
+  optional GameState game = 11;
+}
+
+message PrivateLobbySnapshot {
+  LobbySnapshot lobby = 1;
+  string player_id = 2;
+  bool my_move_submitted = 3;
+}
+
+message RevealedMove {
+  string player_id = 1;
+  uint32 seat = 2;
+  Action action = 3;
+}
+
+message LobbyEvent {
+  uint64 version = 1;
+  LobbyEventKind kind = 2;
+  LobbySnapshot lobby = 3;
+  repeated RevealedMove moves = 4;
+}
+
+message CreateLobbyRequest {
+  string display_name = 1;
+  uint32 max_players = 2;
+  uint32 turn_seconds = 3;
+}
+
+message JoinLobbyRequest {
+  string lobby_code = 1;
+  string display_name = 2;
+}
+
+message JoinLobbyResponse {
+  string player_id = 1;
+  string session_token = 2;
+  LobbySnapshot lobby = 3;
+}
+
+message GetLobbyRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+}
+
+message WatchLobbyRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+  uint64 after_version = 4;
+}
+
+message StartGameRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+}
+
+message SubmitMoveRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+  uint64 game_id = 4;
+  uint64 turn = 5;
+  Action action = 6;
+  string request_id = 7;
+}
+
+message SubmitMoveResponse {
+  bool accepted = 1;
+  bool already_submitted = 2;
+  uint64 turn = 3;
+}
+
+message AddBotRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+  string bot_type_id = 4;
+  string display_name = 5;
+}
+
+message AddBotResponse {
+  LobbySnapshot lobby = 1;
+}
+
+message StartBotRequest {
+  string game_server_url = 1;
+  string lobby_id = 2;
+  string player_id = 3;
+  string session_token = 4;
+  string bot_type_id = 5;
+  string display_name = 6;
+}
+
+message StartBotResponse {
+  string bot_instance_id = 1;
+}

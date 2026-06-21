@@ -1,0 +1,36 @@
+[package]
+name = "herdcore-web"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+console_error_panic_hook = "0.1"
+gloo-timers = { version = "0.3", features = ["futures"] }
+herdcore-core = { path = "../core" }
+herdcore-protocol = { path = "../protocol" }
+js-sys = "0.3"
+tonic = { workspace = true }
+tonic-web-wasm-client = "0.9.1"
+uuid = { workspace = true, features = ["js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "CanvasRenderingContext2d",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlButtonElement",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "KeyboardEvent",
+    "Storage",
+    "Window",
+]
