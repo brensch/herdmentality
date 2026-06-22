@@ -1,0 +1,18 @@
+# Build artifacts and local state — never needed in the image, and huge.
+target/
+dist/
+.git/
+
+# Local embedded Turso database and logs.
+*.db
+*.db-*
+*.sqlite
+*.sqlite*
+*.log
+
+# Local config / editor state.
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,31 @@
+# Frontend container. TLS is terminated upstream by the external Caddy that owns
+# herdcore.snek2.ddns.net, so this listens on plain :80 and is the only service
+# in the stack with a published port.
+:80 {
+	# Compress everything on the way out. zstd/gzip make the WASM payload small
+	# and the browser streams-compiles it.
+	encode zstd gzip
+
+	# WebSocket API: hand /ws straight to the game server over the internal
+	# network. Caddy upgrades the connection transparently.
+	@ws path /ws /ws/*
+	handle @ws {
+		reverse_proxy server:55051
+	}
+
+	# Static SPA. Trunk fingerprints every asset filename, so those can be cached
+	# forever. The shell (index.html, served at / and as the router fallback) must
+	# stay fresh so new deploys are picked up immediately. Matching on the asset
+	# extensions — not the path /index.html — is what makes the fallback no-cache.
+	handle {
+		root * /srv
+
+		@immutable path *.js *.wasm *.css *.woff2 *.woff *.ttf *.otf *.png *.jpg *.jpeg *.gif *.svg *.ico
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		@shell not path *.js *.wasm *.css *.woff2 *.woff *.ttf *.otf *.png *.jpg *.jpeg *.gif *.svg *.ico
+		header @shell Cache-Control "no-cache"
+
+		try_files {path} /index.html
+		file_server
+	}
+}

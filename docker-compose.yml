@@ -1,0 +1,52 @@
+name: herdcore
+
+services:
+  # axum WebSocket game server. No published ports: only reachable inside the
+  # stack (the web container proxies browser traffic to it).
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: server
+    environment:
+      HERDCORE_LISTEN: 0.0.0.0:55051
+      HERDCORE_DB: /data/herdcore.db
+      # URL embedded in seat-assignment frames; the bot service dials it, so it
+      # must resolve on the internal network.
+      HERDCORE_PUBLIC_WS_URL: ws://server:55051/ws
+    volumes:
+      - herdcore-data:/data
+    restart: unless-stopped
+
+  # Bot service: dials the server and plays CPU seats. Internal only.
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: bot
+    environment:
+      HERDCORE_WS_URL: ws://server:55051/ws
+      HERDCORE_BOT_TYPES: greedy-v1,lookahead-v1
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  # Caddy serving the WASM frontend and proxying /ws to the server. This is the
+  # only service exposed to the host; the external Caddy on the home box proxies
+  # herdcore.snek2.ddns.net to this port.
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: web
+      # No HERDCORE_WS_URL: the app connects same-origin, so the browser dials
+      # /ws on whatever host served the page (localhost, the public domain, …)
+      # and Caddy proxies it to the server.
+    depends_on:
+      - server
+    ports:
+      - "${HERDCORE_WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  herdcore-data:

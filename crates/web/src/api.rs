@@ -1,16 +1,31 @@
 //! Server connection details and session persistence.
 
-/// WebSocket URL of the game server, baked into the bundle. Override per
-/// deployment with `HERDCORE_WS_URL=wss://…/ws` at build time.
-pub const WS_URL: &str = match option_env!("HERDCORE_WS_URL") {
-    Some(url) => url,
-    None => "ws://127.0.0.1:55051/ws",
-};
-
 const SESSION_KEY: &str = "herdcore.session.v4";
 
+/// WebSocket URL of the game server.
+///
+/// By default the app connects **same-origin**: the page's own host with a
+/// `ws`/`wss` scheme matching `http`/`https`, at `/ws`. That makes a single
+/// build work behind any domain or reverse proxy that serves the app and proxies
+/// `/ws` to the server (the deployment's Caddy does exactly this), with no
+/// per-domain rebuild.
+///
+/// A build-time `HERDCORE_WS_URL=wss://…/ws` override still wins when you need to
+/// point a bundle at a different host (e.g. a local `trunk serve` talking to a
+/// remote server).
 pub fn ws_url() -> String {
-    WS_URL.to_owned()
+    if let Some(url) = option_env!("HERDCORE_WS_URL") {
+        return url.to_owned();
+    }
+    if let Some(window) = web_sys::window() {
+        let location = window.location();
+        if let (Ok(protocol), Ok(host)) = (location.protocol(), location.host()) {
+            let scheme = if protocol == "https:" { "wss" } else { "ws" };
+            return format!("{scheme}://{host}/ws");
+        }
+    }
+    // Non-browser fallback (tests / SSR), matches the server's default listener.
+    "ws://127.0.0.1:55051/ws".to_owned()
 }
 
 /// Everything needed to re-attach to a lobby across reloads.
