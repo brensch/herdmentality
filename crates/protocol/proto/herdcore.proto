@@ -5,7 +5,10 @@ package herdcore.v1;
 service Herdcore {
   rpc CreateLobby(CreateLobbyRequest) returns (JoinLobbyResponse);
   rpc JoinLobby(JoinLobbyRequest) returns (JoinLobbyResponse);
+  rpc JoinOrCreateLobby(JoinOrCreateLobbyRequest) returns (JoinLobbyResponse);
+  rpc LeaveLobby(LeaveLobbyRequest) returns (LeaveLobbyResponse);
   rpc GetLobby(GetLobbyRequest) returns (PrivateLobbySnapshot);
+  rpc ListGames(GetLobbyRequest) returns (ListGamesResponse);
   rpc WatchLobby(WatchLobbyRequest) returns (stream LobbyEvent);
   rpc StartGame(StartGameRequest) returns (LobbySnapshot);
   rpc SubmitMove(SubmitMoveRequest) returns (SubmitMoveResponse);
@@ -102,6 +105,18 @@ message PrivateLobbySnapshot {
   bool my_move_submitted = 3;
 }
 
+// One past or in-progress game in a lobby's history.
+message GameSummary {
+  uint64 game_id = 1;
+  LobbyPhase status = 2;       // PLAYING while live, FINISHED once decided
+  repeated uint32 winners = 3; // winning seats, set when finished
+  int64 ended_unix_ms = 4;
+}
+
+message ListGamesResponse {
+  repeated GameSummary games = 1;
+}
+
 message RevealedMove {
   string player_id = 1;
   uint32 seat = 2;
@@ -124,6 +139,23 @@ message CreateLobbyRequest {
 message JoinLobbyRequest {
   string lobby_code = 1;
   string display_name = 2;
+}
+
+message JoinOrCreateLobbyRequest {
+  // Human-typed lobby word; the server normalizes it to a slug and joins the
+  // matching lobby if one exists, otherwise creates it.
+  string lobby_name = 1;
+  string display_name = 2;
+}
+
+message LeaveLobbyRequest {
+  string lobby_id = 1;
+  string player_id = 2;
+  string session_token = 3;
+}
+
+message LeaveLobbyResponse {
+  bool left = 1;
 }
 
 message JoinLobbyResponse {

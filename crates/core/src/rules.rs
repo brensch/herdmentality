@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type SeatId = u8;
 
 pub const MIN_PLAYERS: u8 = 2;
-pub const MAX_PLAYERS: u8 = 16;
-pub const LAYOUT_VERSION: u16 = 2;
+pub const MAX_PLAYERS: u8 = 8;
+pub const LAYOUT_VERSION: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
@@ -416,8 +416,11 @@ struct ArenaSlot {
 }
 
 fn arena_slots() -> Vec<ArenaSlot> {
-    let offsets = [9, 16, 24, 31];
-    let mut slots = Vec::with_capacity(16);
+    // Two near-corner slots per edge (8 total). The mid-edge positions are left
+    // out so no dog is stranded in the middle of a wall without a corner to herd
+    // sheep against.
+    let offsets = [9, 31];
+    let mut slots = Vec::with_capacity(8);
 
     for x in offsets {
         slots.push(ArenaSlot {
@@ -501,7 +504,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layouts_support_two_through_sixteen_players() {
+    fn layouts_support_two_through_eight_players() {
         for count in MIN_PLAYERS..=MAX_PLAYERS {
             let state = initial_state_for_players(count).unwrap();
             assert_eq!(state.players.len(), usize::from(count));
@@ -520,7 +523,7 @@ mod tests {
 
     #[test]
     fn layout_generation_is_deterministic() {
-        assert_eq!(initial_state_for_players(16), initial_state_for_players(16));
+        assert_eq!(initial_state_for_players(8), initial_state_for_players(8));
     }
 
     #[test]

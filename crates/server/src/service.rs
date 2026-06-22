@@ -70,6 +70,40 @@ impl Herdcore for HerdcoreService {
         }))
     }
 
+    async fn join_or_create_lobby(
+        &self,
+        request: Request<v1::JoinOrCreateLobbyRequest>,
+    ) -> Result<Response<v1::JoinLobbyResponse>, Status> {
+        let request = request.into_inner();
+        let (player, lobby) = self
+            .app
+            .join_or_create_lobby(&request.lobby_name, request.display_name)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(v1::JoinLobbyResponse {
+            player_id: player.player_id,
+            session_token: player.session_token,
+            lobby: Some(lobby),
+        }))
+    }
+
+    async fn leave_lobby(
+        &self,
+        request: Request<v1::LeaveLobbyRequest>,
+    ) -> Result<Response<v1::LeaveLobbyResponse>, Status> {
+        let request = request.into_inner();
+        let left = self
+            .app
+            .leave_lobby(
+                &request.lobby_id,
+                &request.player_id,
+                &request.session_token,
+            )
+            .await
+            .map_err(status)?;
+        Ok(Response::new(v1::LeaveLobbyResponse { left }))
+    }
+
     async fn get_lobby(
         &self,
         request: Request<v1::GetLobbyRequest>,
@@ -84,6 +118,23 @@ impl Herdcore for HerdcoreService {
             .await
             .map(Response::new)
             .map_err(status)
+    }
+
+    async fn list_games(
+        &self,
+        request: Request<v1::GetLobbyRequest>,
+    ) -> Result<Response<v1::ListGamesResponse>, Status> {
+        let request = request.into_inner();
+        let games = self
+            .app
+            .list_games(
+                &request.lobby_id,
+                &request.player_id,
+                &request.session_token,
+            )
+            .await
+            .map_err(status)?;
+        Ok(Response::new(v1::ListGamesResponse { games }))
     }
 
     async fn watch_lobby(

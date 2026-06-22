@@ -11,6 +11,11 @@ use uuid::Uuid;
 use crate::model::{InternalPlayer, LobbyState, PendingMove};
 use crate::repository::Repository;
 
+/// Word-keyed lobbies are created with these defaults; the start screen does not
+/// expose capacity or turn length.
+const DEFAULT_MAX_PLAYERS: u8 = herdcore_core::MAX_PLAYERS;
+const DEFAULT_TURN_SECONDS: u16 = 20;
+
 pub struct Lobby {
     pub state: Mutex<LobbyState>,
     pub events: broadcast::Sender<v1::LobbyEvent>,
@@ -67,8 +72,12 @@ impl App {
         turn_seconds: u16,
     ) -> Result<(InternalPlayer, v1::LobbySnapshot)> {
         validate_name(&display_name)?;
-        if !(2..=16).contains(&max_players) {
-            bail!("max players must be between 2 and 16");
+        if !(herdcore_core::MIN_PLAYERS..=herdcore_core::MAX_PLAYERS).contains(&max_players) {
+            bail!(
+                "max players must be between {} and {}",
+                herdcore_core::MIN_PLAYERS,
+                herdcore_core::MAX_PLAYERS
+            );
         }
         if !(3..=300).contains(&turn_seconds) {
             bail!("turn duration must be between 3 and 300 seconds");
@@ -120,15 +129,79 @@ impl App {
             .get(&code)
             .cloned()
             .context("lobby not found")?;
-        let lobby = self.lobby(&lobby_id).await?;
-        let mut state = lobby.state.lock().await;
-        if state.phase != v1::LobbyPhase::Waiting {
-            bail!("game has already started");
+        self.join_existing(&lobby_id, display_name).await
+    }
+
+    /// Join the lobby that owns `lobby_name`, creating it if no lobby uses that
+    /// word yet. Lobbies are keyed by their normalized word so the same word
+    /// always lands everyone in the same persistent room.
+    pub async fn join_or_create_lobby(
+        self: &Arc<Self>,
+        lobby_name: &str,
+        display_name: String,
+    ) -> Result<(InternalPlayer, v1::LobbySnapshot)> {
+        validate_name(&display_name)?;
+        let slug = normalize_lobby_name(lobby_name)?;
+
+        if let Some(lobby_id) = self.codes.read().await.get(&slug).cloned() {
+            return self.join_existing(&lobby_id, display_name).await;
         }
+
+        // Hold the code map for the whole create path so two players racing on
+        // the same fresh word cannot both create a lobby for it.
+        let mut codes = self.codes.write().await;
+        if let Some(lobby_id) = codes.get(&slug).cloned() {
+            drop(codes);
+            return self.join_existing(&lobby_id, display_name).await;
+        }
+
+        let lobby_id = Uuid::new_v4().to_string();
+        let host = new_player(display_name, v1::PlayerKind::Human, None);
+        let state = LobbyState {
+            lobby_id: lobby_id.clone(),
+            lobby_code: slug.clone(),
+            phase: v1::LobbyPhase::Waiting,
+            host_player_id: host.player_id.clone(),
+            max_players: DEFAULT_MAX_PLAYERS,
+            turn_seconds: DEFAULT_TURN_SECONDS,
+            public_version: 1,
+            game_id: 0,
+            deadline_unix_ms: 0,
+            players: vec![host.clone()],
+            game: None,
+            pending: BTreeMap::new(),
+        };
+        self.repository.create_lobby(&state).await?;
+        let snapshot = state.snapshot();
+        let (events, _) = broadcast::channel(128);
+        let lobby = Arc::new(Lobby {
+            state: Mutex::new(state),
+            events,
+        });
+        codes.insert(slug, lobby_id.clone());
+        self.lobbies.write().await.insert(lobby_id, lobby);
+        Ok((host, snapshot))
+    }
+
+    /// Add a human to an existing lobby in any phase. A player who joins while a
+    /// game is running is seated only when the next game starts, so until then
+    /// they spectate the live board.
+    async fn join_existing(
+        &self,
+        lobby_id: &str,
+        display_name: String,
+    ) -> Result<(InternalPlayer, v1::LobbySnapshot)> {
+        let lobby = self.lobby(lobby_id).await?;
+        let mut state = lobby.state.lock().await;
         if state.players.len() >= usize::from(state.max_players) {
             bail!("lobby is full");
         }
         let player = new_player(display_name, v1::PlayerKind::Human, None);
+        // A finished round has no active host responsibilities, so hand the room
+        // to whoever shows up next; this keeps abandoned lobbies startable.
+        if state.phase == v1::LobbyPhase::Finished {
+            state.host_player_id = player.player_id.clone();
+        }
         state.players.push(player.clone());
         state.public_version += 1;
         self.repository.persist_snapshot(&state).await?;
@@ -140,6 +213,54 @@ impl App {
             Vec::new(),
         );
         Ok((player, snapshot))
+    }
+
+    /// Remove a player from a lobby. The host role passes to a remaining human
+    /// when the host leaves, and an emptied lobby is torn down entirely so its
+    /// word becomes free again.
+    pub async fn leave_lobby(&self, lobby_id: &str, player_id: &str, token: &str) -> Result<bool> {
+        let lobby = self.lobby(lobby_id).await?;
+        let mut state = lobby.state.lock().await;
+        if state.authenticate(player_id, token).is_none() {
+            bail!("unauthorized");
+        }
+        let Some(index) = state
+            .players
+            .iter()
+            .position(|player| player.player_id == player_id)
+        else {
+            return Ok(false);
+        };
+        state.players.remove(index);
+        state.pending.remove(player_id);
+
+        let remaining_humans: Vec<String> = state
+            .players
+            .iter()
+            .filter(|player| player.kind == v1::PlayerKind::Human)
+            .map(|player| player.player_id.clone())
+            .collect();
+        if remaining_humans.is_empty() {
+            // Nobody human is left to drive the room; drop it and free the word.
+            let code = state.lobby_code.clone();
+            drop(state);
+            self.codes.write().await.remove(&code);
+            self.lobbies.write().await.remove(lobby_id);
+            self.repository.delete_lobby(lobby_id).await?;
+            return Ok(true);
+        }
+        if state.host_player_id == player_id {
+            state.host_player_id = remaining_humans[0].clone();
+        }
+        state.public_version += 1;
+        self.repository.persist_snapshot(&state).await?;
+        send_event(
+            &lobby,
+            v1::LobbyEventKind::LobbyUpdated,
+            state.snapshot(),
+            Vec::new(),
+        );
+        Ok(true)
     }
 
     pub async fn get_private_snapshot(
@@ -158,6 +279,31 @@ impl App {
             player_id: player_id.to_owned(),
             my_move_submitted: state.pending.contains_key(player_id),
         })
+    }
+
+    pub async fn list_games(
+        &self,
+        lobby_id: &str,
+        player_id: &str,
+        token: &str,
+    ) -> Result<Vec<v1::GameSummary>> {
+        let lobby = self.lobby(lobby_id).await?;
+        {
+            let state = lobby.state.lock().await;
+            state
+                .authenticate(player_id, token)
+                .context("unauthorized")?;
+        }
+        let records = self.repository.list_games(lobby_id).await?;
+        Ok(records
+            .into_iter()
+            .map(|record| v1::GameSummary {
+                game_id: record.game_id,
+                status: record.status,
+                winners: record.winners,
+                ended_unix_ms: record.ended_unix_ms,
+            })
+            .collect())
     }
 
     pub async fn watch_lobby(
@@ -190,11 +336,16 @@ impl App {
         let lobby = self.lobby(lobby_id).await?;
         let mut state = lobby.state.lock().await;
         authenticate_host(&state, player_id, token)?;
-        if state.phase != v1::LobbyPhase::Waiting {
-            bail!("lobby is not waiting");
+        // A lobby starts the next round either from its initial waiting room or
+        // after a finished game; an in-progress game cannot be restarted.
+        if state.phase == v1::LobbyPhase::Playing {
+            bail!("a game is already in progress");
         }
         if state.players.len() < 2 {
             bail!("at least two players are required");
+        }
+        if state.players.len() > usize::from(herdcore_core::MAX_PLAYERS) {
+            bail!("too many players for one game");
         }
         for (seat, player) in state.players.iter_mut().enumerate() {
             player.seat = Some(seat as u8);
@@ -209,6 +360,9 @@ impl App {
         state.deadline_unix_ms = now_ms() + i64::from(state.turn_seconds) * 1000;
         state.public_version += 1;
         self.repository.persist_snapshot(&state).await?;
+        self.repository
+            .record_game_started(&state.lobby_id, state.game_id)
+            .await?;
         let snapshot = state.snapshot();
         let game_id = state.game_id;
         let turn = state.game.as_ref().unwrap().turn;
@@ -472,6 +626,14 @@ impl App {
             eprintln!("failed to mark outbox event published: {error:#}");
         }
         if next_game.game_over {
+            let winners: Vec<u32> = next_game.winners.iter().map(|seat| u32::from(*seat)).collect();
+            if let Err(error) = self
+                .repository
+                .record_game_finished(&state.lobby_id, state.game_id, &winners, resolved_at)
+                .await
+            {
+                eprintln!("failed to record finished game: {error:#}");
+            }
             Ok(None)
         } else {
             Ok(Some((
@@ -565,6 +727,28 @@ fn validate_name(name: &str) -> Result<()> {
         bail!("display name must contain 1 to 24 printable characters");
     }
     Ok(())
+}
+
+/// Collapse a human-typed lobby word into a stable key: lowercase, with runs of
+/// non-alphanumeric characters folded to single dashes. Everyone who types the
+/// same word (regardless of spacing or case) shares one lobby.
+fn normalize_lobby_name(name: &str) -> Result<String> {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.extend(ch.to_lowercase());
+            last_was_dash = false;
+        } else if !slug.is_empty() && !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_owned();
+    if slug.is_empty() || slug.chars().count() > 32 {
+        bail!("lobby name must contain 1 to 32 letters or digits");
+    }
+    Ok(slug)
 }
 
 fn send_event(
@@ -668,5 +852,157 @@ mod tests {
         assert_eq!(resolved.kind, v1::LobbyEventKind::TurnResolved as i32);
         assert_eq!(resolved.moves.len(), 2);
         assert_eq!(resolved.lobby.unwrap().game.unwrap().turn, 1);
+    }
+
+    async fn test_app() -> (Arc<App>, tempfile::TempDir) {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("game.db");
+        let repository = Repository::open(path.to_str().unwrap()).await.unwrap();
+        let app = App::load(repository).await.unwrap();
+        (app, directory)
+    }
+
+    #[tokio::test]
+    async fn words_route_players_into_shared_lobbies() {
+        let (app, _dir) = test_app().await;
+
+        let (alice, first) = app
+            .join_or_create_lobby("Wiggly Sheep!", "Alice".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(first.lobby_code, "wiggly-sheep");
+        assert_eq!(first.host_player_id, alice.player_id);
+        assert_eq!(first.players.len(), 1);
+
+        // Spacing and case differences normalize to the same word, so Bob lands
+        // in Alice's lobby rather than a new one.
+        let (_bob, joined) = app
+            .join_or_create_lobby("  WIGGLY   sheep ", "Bob".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(joined.lobby_id, first.lobby_id);
+        assert_eq!(joined.players.len(), 2);
+
+        let (_cara, other) = app
+            .join_or_create_lobby("cosmic-collie", "Cara".to_owned())
+            .await
+            .unwrap();
+        assert_ne!(other.lobby_id, first.lobby_id);
+    }
+
+    #[tokio::test]
+    async fn leaving_reassigns_host_then_reclaims_the_word() {
+        let (app, _dir) = test_app().await;
+        let (alice, lobby) = app
+            .join_or_create_lobby("wiggly-sheep", "Alice".to_owned())
+            .await
+            .unwrap();
+        let (bob, _) = app
+            .join_or_create_lobby("wiggly-sheep", "Bob".to_owned())
+            .await
+            .unwrap();
+
+        // Host leaves: the room survives and Bob inherits the host role.
+        assert!(app
+            .leave_lobby(&lobby.lobby_id, &alice.player_id, &alice.session_token)
+            .await
+            .unwrap());
+        let snapshot = app
+            .get_private_snapshot(&lobby.lobby_id, &bob.player_id, &bob.session_token)
+            .await
+            .unwrap()
+            .lobby
+            .unwrap();
+        assert_eq!(snapshot.host_player_id, bob.player_id);
+        assert_eq!(snapshot.players.len(), 1);
+
+        // Last human leaves: the lobby is torn down and the word is free again,
+        // so re-entering it mints a brand new lobby.
+        assert!(app
+            .leave_lobby(&lobby.lobby_id, &bob.player_id, &bob.session_token)
+            .await
+            .unwrap());
+        let (_dee, fresh) = app
+            .join_or_create_lobby("wiggly-sheep", "Dee".to_owned())
+            .await
+            .unwrap();
+        assert_ne!(fresh.lobby_id, lobby.lobby_id);
+        assert_eq!(fresh.players.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_full_eight_dog_lobby_starts() {
+        let (app, _dir) = test_app().await;
+        let (host, lobby) = app
+            .join_or_create_lobby("big-flock", "Dog 1".to_owned())
+            .await
+            .unwrap();
+        for index in 2..=8 {
+            app.join_or_create_lobby("big-flock", format!("Dog {index}"))
+                .await
+                .unwrap();
+        }
+        // The 8-seat lobby is now full; a 9th dog is turned away.
+        assert!(app
+            .join_or_create_lobby("big-flock", "Latecomer".to_owned())
+            .await
+            .is_err());
+
+        let started = app
+            .start_game(&lobby.lobby_id, &host.player_id, &host.session_token)
+            .await
+            .unwrap();
+        assert_eq!(started.phase, v1::LobbyPhase::Playing as i32);
+        assert_eq!(started.game.unwrap().players.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn games_are_recorded_in_lobby_history() {
+        let (app, _dir) = test_app().await;
+        let (host, lobby) = app
+            .join_or_create_lobby("history-room", "Alice".to_owned())
+            .await
+            .unwrap();
+        app.join_or_create_lobby("history-room", "Bob".to_owned())
+            .await
+            .unwrap();
+        app.start_game(&lobby.lobby_id, &host.player_id, &host.session_token)
+            .await
+            .unwrap();
+
+        let games = app
+            .list_games(&lobby.lobby_id, &host.player_id, &host.session_token)
+            .await
+            .unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].game_id, 1);
+        assert_eq!(games[0].status, v1::LobbyPhase::Playing as i32);
+    }
+
+    #[tokio::test]
+    async fn joining_a_running_game_starts_as_a_spectator() {
+        let (app, _dir) = test_app().await;
+        let (alice, lobby) = app
+            .join_or_create_lobby("wiggly-sheep", "Alice".to_owned())
+            .await
+            .unwrap();
+        app.join_or_create_lobby("wiggly-sheep", "Bob".to_owned())
+            .await
+            .unwrap();
+        app.start_game(&lobby.lobby_id, &alice.player_id, &alice.session_token)
+            .await
+            .unwrap();
+
+        let (cara, snapshot) = app
+            .join_or_create_lobby("wiggly-sheep", "Cara".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(snapshot.phase, v1::LobbyPhase::Playing as i32);
+        let cara_view = snapshot
+            .players
+            .iter()
+            .find(|player| player.player_id == cara.player_id)
+            .unwrap();
+        assert!(cara_view.seat.is_none(), "late joiner should be unseated");
     }
 }

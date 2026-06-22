@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn game_state_round_trips() {
-        let original = core::initial_state_for_players(16).unwrap();
+        let original = core::initial_state_for_players(8).unwrap();
         assert_eq!(game_from_proto(&game_to_proto(&original)), Ok(original));
     }
 }

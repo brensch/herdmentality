@@ -14,6 +14,15 @@ pub struct InternalPlayer {
     pub bot_type_id: Option<String>,
 }
 
+/// A row of a lobby's game history, surfaced to the lobby page.
+#[derive(Clone, Debug)]
+pub struct GameRecord {
+    pub game_id: u64,
+    pub status: i32,
+    pub winners: Vec<u32>,
+    pub ended_unix_ms: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingMove {
     pub action: Action,

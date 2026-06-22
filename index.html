@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#111318" />
+    <meta name="theme-color" content="#9bbc0f" />
     <title>Herdcore</title>
     <link
       data-trunk
@@ -11,103 +11,269 @@
       href="crates/web/Cargo.toml"
       data-cargo-manifest="crates/web/Cargo.toml"
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap"
+      rel="stylesheet"
+    />
     <style>
-      * { box-sizing: border-box; }
+      :root {
+        --lcd: #9bbc0f;
+        --lcd-dim: #8bac0f;
+        --moss: #306230;
+        --ink: #0f380f;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: system-ui, sans-serif;
-        background: #111318;
-        color: white;
+      }
+      body {
+        font-family: "Press Start 2P", "Courier New", monospace;
+        background: var(--lcd);
+        color: var(--ink);
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: flex-start;
+        padding: 14px 0 26px;
+        line-height: 1.5;
+        -webkit-font-smoothing: none;
       }
+      /* Dot-matrix scanline overlay across the whole screen. */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 50;
+        background-image: repeating-linear-gradient(
+            0deg,
+            rgba(15, 56, 15, 0.12) 0px,
+            rgba(15, 56, 15, 0.12) 1px,
+            transparent 1px,
+            transparent 3px
+          ),
+          repeating-linear-gradient(
+            90deg,
+            rgba(15, 56, 15, 0.08) 0px,
+            rgba(15, 56, 15, 0.08) 1px,
+            transparent 1px,
+            transparent 3px
+          );
+      }
+      h1 {
+        font-size: 26px;
+        letter-spacing: 2px;
+        margin: 6px 0 2px;
+        text-shadow: 2px 2px 0 var(--lcd-dim);
+        cursor: pointer;
+        user-select: none;
+      }
+      h1:hover {
+        color: var(--moss);
+      }
+      /* The board is sized to a square in JS; full-bleed and borderless. */
       canvas {
         display: block;
-        max-width: 100vw;
-        max-height: 82vh;
+        image-rendering: pixelated;
         touch-action: manipulation;
       }
-      #controls {
+      .panel {
+        width: min(560px, calc(100vw - 24px));
+        margin: 10px auto;
+        padding: 18px;
+        border: 4px solid var(--ink);
+        background: var(--lcd);
+        box-shadow: 6px 6px 0 0 var(--moss);
+      }
+      .field {
+        margin: 14px 0;
+      }
+      label.cap {
+        display: block;
+        font-size: 9px;
+        color: var(--moss);
+        margin-bottom: 8px;
+        letter-spacing: 1px;
+      }
+      .row {
         display: flex;
         flex-wrap: wrap;
-        justify-content: center;
-        max-width: 920px;
-        padding: 8px 8px 18px;
+        gap: 8px;
+        align-items: stretch;
+      }
+      input {
+        flex: 1 1 auto;
+        min-width: 120px;
+        padding: 12px;
+        font-family: inherit;
+        font-size: 12px;
+        color: var(--ink);
+        background: var(--lcd-dim);
+        border: 3px solid var(--ink);
+        outline: none;
+      }
+      input::placeholder {
+        color: var(--moss);
       }
       button {
-        min-width: 76px;
-        border: 1px solid #59616e;
-        border-radius: 8px;
-        font-size: 18px;
-        padding: 12px 16px;
-        margin: 4px;
-        color: white;
-        background: #272c34;
+        font-family: inherit;
+        font-size: 11px;
+        color: var(--lcd);
+        background: var(--ink);
+        border: 3px solid var(--ink);
+        padding: 12px 14px;
         cursor: pointer;
+        letter-spacing: 1px;
       }
-      button:hover { background: #343b46; }
-      button:active { transform: translateY(1px); }
-      button:focus-visible { outline: 3px solid #79a9ff; outline-offset: 2px; }
-      .panel {
-        width: min(920px, calc(100vw - 24px));
-        margin: 12px;
+      button:hover {
+        background: var(--moss);
+      }
+      button:active {
+        transform: translate(1px, 1px);
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      button:focus-visible {
+        outline: 3px solid var(--moss);
+        outline-offset: 2px;
+      }
+      .dice {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 8px 12px;
+      }
+      .die {
+        display: block;
+      }
+      .primary {
+        width: 100%;
+        font-size: 15px;
         padding: 16px;
-        border: 1px solid #343a44;
-        border-radius: 10px;
-        background: #191d24;
+        margin: 6px 0 2px;
       }
-      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-      input {
-        min-width: 130px;
-        padding: 11px 12px;
-        border: 1px solid #59616e;
-        border-radius: 8px;
-        font: inherit;
-        color: white;
-        background: #101319;
+      .lobby-head,
+      .section-label {
+        font-size: 9px;
+        color: var(--moss);
+        margin-bottom: 6px;
+        letter-spacing: 1px;
       }
-      label { color: #bbc1cb; font-size: 14px; }
-      #status { min-height: 24px; color: #ffd66b; }
-      #players { white-space: pre-wrap; color: #dce1e9; line-height: 1.6; }
-      .hidden { display: none !important; }
+      .section-label {
+        margin-top: 16px;
+      }
+      .lobby-code {
+        font-size: 16px;
+        word-break: break-word;
+        margin-bottom: 4px;
+      }
+      .players,
+      .games {
+        font-size: 10px;
+        line-height: 1.9;
+        padding: 12px;
+        background: var(--lcd-dim);
+        border: 3px solid var(--ink);
+        min-height: 36px;
+      }
+      .game-row {
+        color: var(--ink);
+      }
+      .hint {
+        font-size: 9px;
+        color: var(--moss);
+        margin-top: 12px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      #status {
+        min-height: 22px;
+        font-size: 10px;
+        color: var(--ink);
+        background: var(--lcd-dim);
+        border: 3px solid var(--ink);
+        padding: 10px 12px;
+        margin: 10px auto;
+        width: min(560px, calc(100vw - 20px));
+        text-align: center;
+        word-break: break-word;
+      }
+      #hud {
+        font-size: 10px;
+        color: var(--ink);
+        letter-spacing: 1px;
+        line-height: 1.8;
+        text-align: center;
+        margin: 8px auto 6px;
+        width: min(560px, calc(100vw - 20px));
+        word-break: break-word;
+      }
+      /* Gameboy D-pad: arrows on a cross with STAY in the middle. */
+      #controls {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-areas:
+          ". up ."
+          "left stay right"
+          ". down .";
+        gap: 10px;
+        width: min(232px, 62vw);
+        margin: 16px auto 0;
+      }
+      #up { grid-area: up; }
+      #down { grid-area: down; }
+      #left { grid-area: left; }
+      #right { grid-area: right; }
+      #stay { grid-area: stay; }
+      #controls button {
+        aspect-ratio: 1 / 1;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        font-size: 10px;
+      }
+      #up::before,
+      #down::before,
+      #left::before,
+      #right::before {
+        content: "";
+        width: 0;
+        height: 0;
+      }
+      #up::before {
+        border-left: 13px solid transparent;
+        border-right: 13px solid transparent;
+        border-bottom: 17px solid currentColor;
+      }
+      #down::before {
+        border-left: 13px solid transparent;
+        border-right: 13px solid transparent;
+        border-top: 17px solid currentColor;
+      }
+      #left::before {
+        border-top: 13px solid transparent;
+        border-bottom: 13px solid transparent;
+        border-right: 17px solid currentColor;
+      }
+      #right::before {
+        border-top: 13px solid transparent;
+        border-bottom: 13px solid transparent;
+        border-left: 17px solid currentColor;
+      }
     </style>
   </head>
-  <body>
-    <section id="connect-panel" class="panel">
-      <h1>Herdcore</h1>
-      <div class="row">
-        <label>Server <input id="server-url" value="http://127.0.0.1:55051" /></label>
-        <label>Name <input id="display-name" maxlength="24" value="Player" /></label>
-        <label>Lobby code <input id="lobby-code-input" maxlength="6" /></label>
-      </div>
-      <div class="row">
-        <label>Capacity <input id="max-players" type="number" min="2" max="16" value="4" /></label>
-        <label>Turn seconds <input id="turn-seconds" type="number" min="3" max="300" value="20" /></label>
-        <button id="create" type="button">Create lobby</button>
-        <button id="join" type="button">Join lobby</button>
-      </div>
-    </section>
-    <section id="lobby-panel" class="panel hidden">
-      <div class="row">
-        <strong>Lobby: <span id="lobby-code"></span></strong>
-        <button id="add-bot" type="button">Add CPU</button>
-        <button id="start" type="button">Start game</button>
-        <button id="forget" type="button">Leave locally</button>
-      </div>
-      <div id="players"></div>
-    </section>
-    <div id="status"></div>
-    <canvas id="game" class="hidden" aria-label="Herdcore game board"></canvas>
-    <div id="controls" class="hidden" aria-label="Game controls">
-      <button id="up" type="button">Up</button>
-      <button id="down" type="button">Down</button>
-      <button id="left" type="button">Left</button>
-      <button id="right" type="button">Right</button>
-      <button id="stay" type="button">Stay</button>
-      <button id="reconnect" type="button">Reconnect</button>
-    </div>
-  </body>
+  <body></body>
 </html>
