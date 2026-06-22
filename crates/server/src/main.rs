@@ -15,14 +15,21 @@ use repository::Repository;
 use tower_http::cors::CorsLayer;
 use ws::{ws_handler, ProviderRegistry, WsState};
 
-/// The bots offered to players. One for now: "Greedy Greg". The `address` is
-/// informational; a bot service serving this `id` plays the seats.
+/// The bots offered to players. The `address` is informational; a bot service
+/// serving the corresponding `id` plays each seat.
 fn bot_catalogue() -> Vec<v1::BotKind> {
-    vec![v1::BotKind {
-        id: "greedy-v1".to_owned(),
-        name: "Greedy Greg".to_owned(),
-        address: env::var("HERDCORE_GREEDY_ADDR").unwrap_or_else(|_| "127.0.0.1".to_owned()),
-    }]
+    vec![
+        v1::BotKind {
+            id: "greedy-v1".to_owned(),
+            name: "Greedy Greg".to_owned(),
+            address: env::var("HERDCORE_GREEDY_ADDR").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        },
+        v1::BotKind {
+            id: "lookahead-v1".to_owned(),
+            name: "Lookahead Lucy".to_owned(),
+            address: env::var("HERDCORE_LOOKAHEAD_ADDR").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+        },
+    ]
 }
 
 #[tokio::main]

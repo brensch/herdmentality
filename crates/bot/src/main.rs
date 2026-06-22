@@ -17,7 +17,19 @@ async fn main() {
 
     let server_url =
         env::var("HERDCORE_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:55051/ws".to_owned());
-    let bot_type = env::var("HERDCORE_BOT_TYPE").unwrap_or_else(|_| "greedy-v1".to_owned());
-    tracing::info!(%server_url, %bot_type, "herdcore-bot service starting");
-    herdcore_bot::provider::run_service(&server_url, &bot_type).await;
+    let bot_types = env::var("HERDCORE_BOT_TYPES")
+        .or_else(|_| env::var("HERDCORE_BOT_TYPE"))
+        .unwrap_or_else(|_| "greedy-v1,lookahead-v1".to_owned());
+    let bot_types: Vec<_> = bot_types
+        .split(',')
+        .map(str::trim)
+        .filter(|bot_type| !bot_type.is_empty())
+        .collect();
+    tracing::info!(%server_url, ?bot_types, "herdcore-bot service starting");
+    futures_util::future::join_all(
+        bot_types
+            .iter()
+            .map(|bot_type| herdcore_bot::provider::run_service(&server_url, bot_type)),
+    )
+    .await;
 }

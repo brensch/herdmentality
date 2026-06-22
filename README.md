@@ -13,17 +13,19 @@ rustup target add wasm32-unknown-unknown
 cargo install trunk
 ```
 
-Run the external bot provider:
+Run the external bot provider (it serves Greedy Greg and Lookahead Lucy by
+default):
 
 ```bash
-cargo run -p herdcore-bot-provider
+cargo run -p herdcore-bot
 ```
+
+Set `HERDCORE_BOT_TYPES` to a comma-separated subset of `greedy-v1` and
+`lookahead-v1` when the strategies need to run in separate processes.
 
 Run the game server:
 
 ```bash
-HERDCORE_BOT_PROVIDER_URL=http://127.0.0.1:55052 \
-HERDCORE_PUBLIC_URL=http://127.0.0.1:55051 \
 cargo run -p herdcore-server
 ```
 

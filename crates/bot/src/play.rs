@@ -11,10 +11,16 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// Play one seat until removed from the lobby or the session is rejected.
 /// Reconnects on transient drops, gives up after repeated failures.
-pub async fn run_bot(ws_url: &str, lobby_id: &str, player_id: &str, token: &str, _bot_type_id: &str) {
+pub async fn run_bot(
+    ws_url: &str,
+    lobby_id: &str,
+    player_id: &str,
+    token: &str,
+    bot_type_id: &str,
+) {
     let mut failures = 0u32;
     loop {
-        match play_once(ws_url, lobby_id, player_id, token).await {
+        match play_once(ws_url, lobby_id, player_id, token, bot_type_id).await {
             Ok(Outcome::Stop) => return,
             Ok(Outcome::Reconnect) => failures = 0,
             Err(_) => {
@@ -33,10 +39,18 @@ enum Outcome {
     Reconnect,
 }
 
-async fn play_once(ws_url: &str, lobby_id: &str, player_id: &str, token: &str) -> Result<Outcome> {
+async fn play_once(
+    ws_url: &str,
+    lobby_id: &str,
+    player_id: &str,
+    token: &str,
+    bot_type_id: &str,
+) -> Result<Outcome> {
     let (mut socket, _) = connect_async(ws_url).await?;
     socket
-        .send(Message::Binary(encode_frame(&resume(lobby_id, player_id, token))))
+        .send(Message::Binary(encode_frame(&resume(
+            lobby_id, player_id, token,
+        ))))
         .await?;
 
     // One move per (game, turn); the snapshot in each frame is enough to decide.
@@ -83,7 +97,7 @@ async fn play_once(ws_url: &str, lobby_id: &str, player_id: &str, token: &str) -
         }
         acted = Some(turn_key);
 
-        let action = bot::choose_action(&game, seat);
+        let action = bot::choose_action_for(&game, seat, bot_type_id);
         tracing::trace!(
             player = %player_id,
             lobby = %lobby_id,
@@ -95,7 +109,9 @@ async fn play_once(ws_url: &str, lobby_id: &str, player_id: &str, token: &str) -
         );
         // Submitting can lose a race with the deadline; ignore and wait for next.
         let _ = socket
-            .send(Message::Binary(encode_frame(&make_move(&lobby, &game, action))))
+            .send(Message::Binary(encode_frame(&make_move(
+                &lobby, &game, action,
+            ))))
             .await;
     }
     Ok(Outcome::Reconnect)

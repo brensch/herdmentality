@@ -108,11 +108,14 @@ async fn handle_socket(mut socket: WebSocket, state: WsState) {
 /// socket and keep it alive until it disconnects.
 async fn run_provider(mut socket: WebSocket, state: WsState, bot_type_id: String) {
     let (sender, mut receiver) = mpsc::unbounded_channel::<v1::ServerFrame>();
-    let id = state.providers.register(bot_type_id, sender).await;
+    let id = state.providers.register(bot_type_id.clone(), sender).await;
 
     // Hand the provider every CPU seat that already exists (covers recovery and
     // a provider (re)connecting after games are underway).
     for credentials in state.app.recoverable_bots().await {
+        if credentials.bot_type_id != bot_type_id {
+            continue;
+        }
         let _ = socket
             .send(Message::Binary(encode_frame(&assign_frame(&state.ws_url, &credentials))))
             .await;
