@@ -1,66 +1,62 @@
 mod app;
 mod model;
 mod repository;
-mod service;
+mod ws;
 
 use std::env;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::Result;
-use herdcore_protocol::v1::herdcore_server::HerdcoreServer;
+use axum::routing::get;
+use axum::Router;
+use herdcore_protocol::v1;
 use repository::Repository;
-use service::{start_external_bot, HerdcoreService};
-use tonic::transport::Server;
-use tonic_web::GrpcWebLayer;
 use tower_http::cors::CorsLayer;
+use ws::{ws_handler, ProviderRegistry, WsState};
+
+/// The bots offered to players. One for now: "Greedy Greg". The `address` is
+/// informational; a bot service serving this `id` plays the seats.
+fn bot_catalogue() -> Vec<v1::BotKind> {
+    vec![v1::BotKind {
+        id: "greedy-v1".to_owned(),
+        name: "Greedy Greg".to_owned(),
+        address: env::var("HERDCORE_GREEDY_ADDR").unwrap_or_else(|_| "127.0.0.1".to_owned()),
+    }]
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let address: SocketAddr = env::var("HERDCORE_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:55051".to_owned())
         .parse()?;
-    let public_url =
-        env::var("HERDCORE_PUBLIC_URL").unwrap_or_else(|_| format!("http://{address}"));
+    // URL the bot service dials to play CPU seats; defaults to this server.
+    let ws_url =
+        env::var("HERDCORE_PUBLIC_WS_URL").unwrap_or_else(|_| format!("ws://{address}/ws"));
     let database_path = env::var("HERDCORE_DB").unwrap_or_else(|_| "target/herdcore.db".to_owned());
-    let bot_provider_url = env::var("HERDCORE_BOT_PROVIDER_URL").ok();
 
     let repository = Repository::open(&database_path).await?;
     let app = app::App::load(repository).await?;
-    if let Some(provider_url) = &bot_provider_url {
-        for assignment in app.recoverable_bots().await {
-            if let Err(error) = start_external_bot(provider_url, &public_url, &assignment).await {
-                eprintln!(
-                    "failed to restore external bot {}: {error}",
-                    assignment.player_id
-                );
-            }
-        }
-    }
-    let service = HerdcoreService::new(app, bot_provider_url, public_url);
+    // Recovered lobbies' CPU seats are (re)assigned when a bot service connects.
+    let state = WsState {
+        app,
+        ws_url,
+        catalogue: Arc::new(bot_catalogue()),
+        providers: ProviderRegistry::default(),
+    };
 
-    println!("Herdcore server listening on {address}");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server = Server::builder()
-        .accept_http1(true)
+    let router = Router::new()
+        .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
-        .layer(GrpcWebLayer::new())
-        .add_service(HerdcoreServer::new(service))
-        .serve_with_shutdown(address, async {
-            let _ = shutdown_rx.await;
-        });
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => result?,
-        signal = tokio::signal::ctrl_c() => {
-            signal?;
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    println!("Herdcore server listening on {address} (WebSocket at /ws)");
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
             println!("Shutting down Herdcore server…");
-            let _ = shutdown_tx.send(());
-            match tokio::time::timeout(Duration::from_secs(1), &mut server).await {
-                Ok(result) => result?,
-                Err(_) => eprintln!("Closing remaining client streams"),
-            }
-        }
-    }
+        })
+        .await?;
     Ok(())
 }

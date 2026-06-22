@@ -1,0 +1,128 @@
+//! Gameplay client: connect over the WebSocket as a player, receive game
+//! states, and reply with moves. Used by the provider for each assigned seat.
+
+use anyhow::Result;
+use futures_util::{SinkExt, StreamExt};
+use herdcore_core::bot;
+use herdcore_protocol::v1::{client_frame, server_frame};
+use herdcore_protocol::{decode_frame, encode_frame, v1};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+
+/// Play one seat until removed from the lobby or the session is rejected.
+/// Reconnects on transient drops, gives up after repeated failures.
+pub async fn run_bot(ws_url: &str, lobby_id: &str, player_id: &str, token: &str, _bot_type_id: &str) {
+    let mut failures = 0u32;
+    loop {
+        match play_once(ws_url, lobby_id, player_id, token).await {
+            Ok(Outcome::Stop) => return,
+            Ok(Outcome::Reconnect) => failures = 0,
+            Err(_) => {
+                failures += 1;
+                if failures >= 5 {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+enum Outcome {
+    Stop,
+    Reconnect,
+}
+
+async fn play_once(ws_url: &str, lobby_id: &str, player_id: &str, token: &str) -> Result<Outcome> {
+    let (mut socket, _) = connect_async(ws_url).await?;
+    socket
+        .send(Message::Binary(encode_frame(&resume(lobby_id, player_id, token))))
+        .await?;
+
+    // One move per (game, turn); the snapshot in each frame is enough to decide.
+    let mut acted: Option<(u64, u64)> = None;
+
+    while let Some(message) = socket.next().await {
+        let bytes = match message? {
+            Message::Binary(bytes) => bytes,
+            Message::Close(_) => return Ok(Outcome::Reconnect),
+            _ => continue,
+        };
+        let Ok(frame) = decode_frame::<v1::ServerFrame>(&bytes) else {
+            continue;
+        };
+        let lobby = match frame.body {
+            Some(server_frame::Body::Welcome(welcome)) => welcome.lobby,
+            Some(server_frame::Body::Update(update)) => update.lobby,
+            Some(server_frame::Body::Error(error)) if error.fatal => return Ok(Outcome::Stop),
+            Some(server_frame::Body::Bye(_)) => return Ok(Outcome::Stop),
+            _ => continue,
+        };
+        let Some(lobby) = lobby else {
+            continue;
+        };
+        // Removed from the roster.
+        let Some(player) = lobby.players.iter().find(|p| p.player_id == player_id) else {
+            return Ok(Outcome::Stop);
+        };
+        if lobby.phase != v1::LobbyPhase::Playing as i32 {
+            continue;
+        }
+        let (Some(seat), Some(game_proto)) = (
+            player.seat.and_then(|seat| u8::try_from(seat).ok()),
+            lobby.game.as_ref(),
+        ) else {
+            continue;
+        };
+        let Ok(game) = herdcore_protocol::game_from_proto(game_proto) else {
+            continue;
+        };
+        let turn_key = (lobby.game_id, game.turn);
+        if acted == Some(turn_key) {
+            continue;
+        }
+        acted = Some(turn_key);
+
+        let action = bot::choose_action(&game, seat);
+        tracing::trace!(
+            player = %player_id,
+            lobby = %lobby_id,
+            game_id = lobby.game_id,
+            turn = game.turn,
+            seat,
+            ?action,
+            "submitting move"
+        );
+        // Submitting can lose a race with the deadline; ignore and wait for next.
+        let _ = socket
+            .send(Message::Binary(encode_frame(&make_move(&lobby, &game, action))))
+            .await;
+    }
+    Ok(Outcome::Reconnect)
+}
+
+fn resume(lobby_id: &str, player_id: &str, token: &str) -> v1::ClientFrame {
+    v1::ClientFrame {
+        body: Some(client_frame::Body::Resume(v1::Resume {
+            lobby_id: lobby_id.to_owned(),
+            player_id: player_id.to_owned(),
+            session_token: token.to_owned(),
+            after_version: 0,
+        })),
+    }
+}
+
+fn make_move(
+    lobby: &v1::LobbySnapshot,
+    game: &herdcore_core::GameState,
+    action: herdcore_core::Action,
+) -> v1::ClientFrame {
+    v1::ClientFrame {
+        body: Some(client_frame::Body::Move(v1::MoveCommand {
+            game_id: lobby.game_id,
+            turn: game.turn,
+            action: herdcore_protocol::action_to_proto(action) as i32,
+            request_id: uuid::Uuid::new_v4().to_string(),
+        })),
+    }
+}

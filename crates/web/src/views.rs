@@ -1,59 +1,33 @@
 //! Route view components: header, home, join panel, lobby page, and game page.
+//! Actions send WebSocket command frames through the shared [`Connection`];
+//! state arrives back through the reducer the connection drives.
 
 use herdcore_core::{is_action_legal, Action as CoreAction};
+use herdcore_protocol::v1::client_frame;
 use herdcore_protocol::v1;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlCanvasElement, HtmlInputElement, KeyboardEvent};
 use yew::prelude::*;
 use yew_router::prelude::*;
 
-use crate::api::{self, Session};
+use crate::api::Session;
 use crate::names;
 use crate::render;
 use crate::state::{AppAction, AppHandle};
+use crate::ws::Connection;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// The dot-matrix isometric die icon used on the reroll buttons.
+fn frame(body: client_frame::Body) -> v1::ClientFrame {
+    v1::ClientFrame { body: Some(body) }
+}
+
 fn die_svg() -> Html {
     let svg = r##"<svg class="die" viewBox="0 0 32 32" width="26" height="26" shape-rendering="crispEdges" aria-hidden="true"><polygon points="16,4 28,11 16,18 4,11" fill="#cfe07a"/><polygon points="4,11 16,18 16,29 4,22" fill="#8bac0f"/><polygon points="16,18 28,11 28,22 16,29" fill="#306230"/><rect x="15" y="10" width="2" height="2" fill="#0f380f"/><rect x="8" y="15" width="2" height="2" fill="#0f380f"/><rect x="11" y="21" width="2" height="2" fill="#0f380f"/><rect x="20" y="18" width="2" height="2" fill="#cfe07a"/><rect x="23" y="15" width="2" height="2" fill="#cfe07a"/></svg>"##;
     Html::from_html_unchecked(AttrValue::from(svg))
-}
-
-/// Join or create `word` as `name`, store the session, and update state. The
-/// navigation controller then routes us into the lobby or the live game.
-async fn join_lobby(word: String, name: String, state: AppHandle) {
-    let mut client = api::rpc_client();
-    match client
-        .join_or_create_lobby(v1::JoinOrCreateLobbyRequest {
-            lobby_name: word,
-            display_name: name,
-        })
-        .await
-    {
-        Ok(response) => {
-            let response = response.into_inner();
-            if let Some(lobby) = response.lobby {
-                let session = Session {
-                    lobby_id: lobby.lobby_id.clone(),
-                    player_id: response.player_id,
-                    token: response.session_token,
-                    word: lobby.lobby_code.clone(),
-                };
-                api::save_session(&session);
-                state.dispatch(AppAction::Joined { session, lobby });
-            } else {
-                state.dispatch(AppAction::Status("Server returned no lobby".into()));
-            }
-        }
-        Err(error) => {
-            state.dispatch(AppAction::Status(format!("Could not enter: {}", error.message())))
-        }
-    }
 }
 
 fn input_value(node: &NodeRef) -> String {
@@ -77,25 +51,13 @@ fn prefill(node: &NodeRef, value: String) {
 #[function_component(Header)]
 pub fn header() -> Html {
     let state = use_context::<AppHandle>().expect("app context");
+    let connection = use_context::<Connection>().expect("connection");
     let navigator = use_navigator().expect("navigator");
 
     let on_home = {
-        let state = state.clone();
+        let connection = connection.clone();
         Callback::from(move |_: MouseEvent| {
-            if let Some(session) = state.session.clone() {
-                spawn_local(async move {
-                    let mut client = api::rpc_client();
-                    let _ = client
-                        .leave_lobby(v1::LeaveLobbyRequest {
-                            lobby_id: session.lobby_id,
-                            player_id: session.player_id,
-                            session_token: session.token,
-                        })
-                        .await;
-                });
-            }
-            api::clear_session();
-            state.dispatch(AppAction::Cleared);
+            connection.leave();
             navigator.push(&crate::app::Route::Home);
         })
     };
@@ -115,6 +77,7 @@ pub fn header() -> Html {
 #[function_component(Home)]
 pub fn home() -> Html {
     let state = use_context::<AppHandle>().expect("app context");
+    let connection = use_context::<Connection>().expect("connection");
     let name_ref = use_node_ref();
     let lobby_ref = use_node_ref();
 
@@ -147,6 +110,7 @@ pub fn home() -> Html {
 
     let on_start = {
         let state = state.clone();
+        let connection = connection.clone();
         let name_ref = name_ref.clone();
         let lobby_ref = lobby_ref.clone();
         Callback::from(move |_: MouseEvent| {
@@ -160,8 +124,7 @@ pub fn home() -> Html {
                 state.dispatch(AppAction::Status("Type or roll a lobby name".into()));
                 return;
             }
-            let state = state.clone();
-            spawn_local(async move { join_lobby(word, name, state).await });
+            connection.join(word, name);
         })
     };
 
@@ -200,6 +163,7 @@ pub struct JoinProps {
 #[function_component(JoinPanel)]
 pub fn join_panel(props: &JoinProps) -> Html {
     let state = use_context::<AppHandle>().expect("app context");
+    let connection = use_context::<Connection>().expect("connection");
     let word = props.lobby.clone();
     let name_ref = use_node_ref();
 
@@ -213,6 +177,7 @@ pub fn join_panel(props: &JoinProps) -> Html {
 
     let on_join = {
         let state = state.clone();
+        let connection = connection.clone();
         let name_ref = name_ref.clone();
         let word = word.clone();
         Callback::from(move |_: MouseEvent| {
@@ -221,9 +186,7 @@ pub fn join_panel(props: &JoinProps) -> Html {
                 state.dispatch(AppAction::Status("Pick a name first".into()));
                 return;
             }
-            let state = state.clone();
-            let word = word.clone();
-            spawn_local(async move { join_lobby(word, name, state).await });
+            connection.join(word.clone(), name);
         })
     };
 
@@ -243,7 +206,7 @@ pub fn join_panel(props: &JoinProps) -> Html {
 }
 
 // ---------------------------------------------------------------------------
-// Lobby: roster + game history + host controls (the waiting/results room)
+// Lobby: roster + game history + host controls
 // ---------------------------------------------------------------------------
 
 #[derive(Properties, PartialEq)]
@@ -254,39 +217,23 @@ pub struct LobbyProps {
 #[function_component(LobbyView)]
 pub fn lobby_view(props: &LobbyProps) -> Html {
     let state = use_context::<AppHandle>().expect("app context");
+    let connection = use_context::<Connection>().expect("connection");
     let word = props.lobby.clone();
 
-    let games = use_state(Vec::<v1::GameSummary>::new);
+    // Refresh the games list whenever a game starts or ends.
     {
-        let games = games.clone();
-        let session = state.session.clone();
+        let connection = connection.clone();
         let key = state
             .lobby
             .as_ref()
             .map(|l| (l.game_id, l.phase))
             .unwrap_or((0, 0));
         use_effect_with(key, move |_| {
-            if let Some(session) = session {
-                let games = games.clone();
-                spawn_local(async move {
-                    let mut client = api::rpc_client();
-                    if let Ok(response) = client
-                        .list_games(v1::GetLobbyRequest {
-                            lobby_id: session.lobby_id,
-                            player_id: session.player_id,
-                            session_token: session.token,
-                        })
-                        .await
-                    {
-                        games.set(response.into_inner().games);
-                    }
-                });
-            }
+            connection.send(frame(client_frame::Body::ListGames(v1::ListGamesCommand {})));
             || ()
         });
     }
 
-    // After all hooks: non-members get the join panel.
     if !state.is_member_of(&word) {
         return html! { <JoinPanel lobby={word} /> };
     }
@@ -304,65 +251,17 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
     let can_manage = is_host && (waiting || finished);
 
     let on_start = {
-        let state = state.clone();
+        let connection = connection.clone();
         Callback::from(move |_: MouseEvent| {
-            let Some(session) = state.session.clone() else {
-                return;
-            };
-            let state = state.clone();
-            spawn_local(async move {
-                let mut client = api::rpc_client();
-                match client
-                    .start_game(v1::StartGameRequest {
-                        lobby_id: session.lobby_id,
-                        player_id: session.player_id,
-                        session_token: session.token,
-                    })
-                    .await
-                {
-                    Ok(response) => state.dispatch(AppAction::SetLobby {
-                        lobby: response.into_inner(),
-                        my_move_submitted: false,
-                    }),
-                    Err(error) => {
-                        state.dispatch(AppAction::Status(format!("Start failed: {}", error.message())))
-                    }
-                }
-            });
+            connection.send(frame(client_frame::Body::Start(v1::StartCommand {})));
         })
     };
-
-    let on_add_bot = {
-        let state = state.clone();
-        Callback::from(move |_: MouseEvent| {
-            let Some(session) = state.session.clone() else {
-                return;
-            };
-            let state = state.clone();
-            spawn_local(async move {
-                let mut client = api::rpc_client();
-                match client
-                    .add_bot(v1::AddBotRequest {
-                        lobby_id: session.lobby_id,
-                        player_id: session.player_id,
-                        session_token: session.token,
-                        bot_type_id: "greedy-v1".to_owned(),
-                        display_name: "CPU".to_owned(),
-                    })
-                    .await
-                {
-                    Ok(response) => {
-                        if let Some(lobby) = response.into_inner().lobby {
-                            state.dispatch(AppAction::SetLobby {
-                                lobby,
-                                my_move_submitted: false,
-                            });
-                        }
-                    }
-                    Err(error) => state
-                        .dispatch(AppAction::Status(format!("Add CPU failed: {}", error.message()))),
-                }
-            });
+    let on_remove_bot = {
+        let connection = connection.clone();
+        Callback::from(move |bot_player_id: String| {
+            connection.send(frame(client_frame::Body::RemoveBot(v1::RemoveBotCommand {
+                bot_player_id,
+            })));
         })
     };
 
@@ -374,15 +273,15 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
             <div class="lobby-code">{ &word }</div>
 
             <div class="section-label">{ "PLAYERS" }</div>
-            <div class="players">{ roster(&lobby, state.session.as_ref()) }</div>
+            <div class="players">{ roster(&lobby, state.session.as_ref(), can_manage, on_remove_bot) }</div>
 
             <div class="section-label">{ "GAMES" }</div>
-            <div class="games">{ games_list(&games, &lobby) }</div>
+            <div class="games">{ games_list(&state.games, &lobby) }</div>
 
             if can_manage {
-                <div class="actions">
+                <div class="bot-row">{ bot_buttons(&state.catalogue, &connection) }</div>
+                <div class="start-row">
                     <button onclick={on_start}>{ start_label }</button>
-                    <button onclick={on_add_bot}>{ "ADD CPU" }</button>
                 </div>
             } else if waiting {
                 <div class="hint">{ "Waiting for the host to start…" }</div>
@@ -391,22 +290,58 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
     }
 }
 
-fn roster(lobby: &v1::LobbySnapshot, session: Option<&Session>) -> Html {
+/// One "+ Name" button per catalogue bot, on a single row.
+fn bot_buttons(catalogue: &[v1::BotKind], connection: &Connection) -> Html {
+    html! {
+        { for catalogue.iter().map(|kind| {
+            let connection = connection.clone();
+            let bot_type_id = kind.id.clone();
+            let display_name = kind.name.clone();
+            let label = format!("+ {}", kind.name);
+            let address: AttrValue = kind.address.clone().into();
+            let onclick = Callback::from(move |_: MouseEvent| {
+                connection.send(frame(client_frame::Body::AddBot(v1::AddBotCommand {
+                    display_name: display_name.clone(),
+                    bot_type_id: bot_type_id.clone(),
+                    url: String::new(),
+                })));
+            });
+            html! { <button class="bot-btn" title={address} {onclick}>{ label }</button> }
+        }) }
+    }
+}
+
+fn roster(
+    lobby: &v1::LobbySnapshot,
+    session: Option<&Session>,
+    can_manage: bool,
+    on_remove: Callback<String>,
+) -> Html {
     html! {
         { for lobby.players.iter().map(|player| {
             let me = session.is_some_and(|s| s.player_id == player.player_id);
             let host = player.player_id == lobby.host_player_id;
+            let is_bot = player.kind == v1::PlayerKind::Bot as i32;
             let mut tags = Vec::new();
             if host { tags.push("HOST"); }
             if me { tags.push("YOU"); }
-            if player.kind == v1::PlayerKind::Bot as i32 { tags.push("CPU"); }
+            if is_bot { tags.push("CPU"); }
             let position = match player.seat {
                 Some(seat) => format!("seat {}", seat + 1),
                 None if lobby.phase == v1::LobbyPhase::Playing as i32 => "spectating".to_owned(),
                 None => "ready".to_owned(),
             };
             let tag_text = if tags.is_empty() { String::new() } else { format!("[{}] ", tags.join(" ")) };
-            html! { <div class="player-row">{ format!("{} {}{}", player.display_name, tag_text, position) }</div> }
+            let label = format!("{} {}{}", player.display_name, tag_text, position);
+            let remove = if can_manage && is_bot {
+                let on_remove = on_remove.clone();
+                let pid = player.player_id.clone();
+                let onclick = Callback::from(move |_: MouseEvent| on_remove.emit(pid.clone()));
+                html! { <button class="remove-bot" title="Remove CPU" {onclick}>{ "×" }</button> }
+            } else {
+                html! {}
+            };
+            html! { <div class="player-row"><span>{ label }</span>{ remove }</div> }
         }) }
     }
 }
@@ -449,12 +384,12 @@ pub struct GameProps {
 #[function_component(GameView)]
 pub fn game_view(props: &GameProps) -> Html {
     let state = use_context::<AppHandle>().expect("app context");
+    let connection = use_context::<Connection>().expect("connection");
     let word = props.lobby.clone();
 
     let canvas_ref = use_node_ref();
     let version = state.lobby.as_ref().map(|l| l.public_version).unwrap_or(0);
 
-    // Redraw the canvas whenever the lobby snapshot changes.
     {
         let canvas_ref = canvas_ref.clone();
         let lobby = state.lobby.clone();
@@ -473,11 +408,13 @@ pub fn game_view(props: &GameProps) -> Html {
         });
     }
 
-    // Keyboard controls; re-registered per snapshot so it always sees fresh state.
+    // Keyboard controls; re-registered per snapshot so it sees fresh state.
     {
         let state = state.clone();
+        let connection = connection.clone();
         use_effect_with(version, move |_| {
-            let key_state = state.clone();
+            let state = state.clone();
+            let connection = connection.clone();
             let listener = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
                 let action = match event.key().to_ascii_lowercase().as_str() {
                     "arrowup" | "w" => Some(CoreAction::Up),
@@ -489,13 +426,13 @@ pub fn game_view(props: &GameProps) -> Html {
                 };
                 if let Some(action) = action {
                     event.prevent_default();
-                    let state = key_state.clone();
-                    spawn_local(async move { submit_action(&state, action).await });
+                    submit_action(&state, &connection, action);
                 }
             });
-            let window = web_sys::window().unwrap();
-            let _ = window
-                .add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref());
+            }
             move || {
                 if let Some(window) = web_sys::window() {
                     let _ = window.remove_event_listener_with_callback(
@@ -508,7 +445,6 @@ pub fn game_view(props: &GameProps) -> Html {
         });
     }
 
-    // Membership check comes after all hooks so the hook order never changes.
     if !state.is_member_of(&word) {
         return html! { <JoinPanel lobby={word} /> };
     }
@@ -532,29 +468,24 @@ pub fn game_view(props: &GameProps) -> Html {
             <div id="hud">{ hud }</div>
             <canvas id="game" ref={canvas_ref} aria-label="Herdcore game board"></canvas>
             <div id="controls">
-                <button id="up" disabled={disabled} onclick={action_cb(&state, CoreAction::Up)} aria-label="Up"></button>
-                <button id="left" disabled={disabled} onclick={action_cb(&state, CoreAction::Left)} aria-label="Left"></button>
-                <button id="stay" disabled={disabled} onclick={action_cb(&state, CoreAction::Stay)}>{ "STAY" }</button>
-                <button id="right" disabled={disabled} onclick={action_cb(&state, CoreAction::Right)} aria-label="Right"></button>
-                <button id="down" disabled={disabled} onclick={action_cb(&state, CoreAction::Down)} aria-label="Down"></button>
+                <button id="up" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Up)} aria-label="Up"></button>
+                <button id="left" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Left)} aria-label="Left"></button>
+                <button id="stay" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Stay)}>{ "STAY" }</button>
+                <button id="right" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Right)} aria-label="Right"></button>
+                <button id="down" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Down)} aria-label="Down"></button>
             </div>
         </>
     }
 }
 
-fn action_cb(state: &AppHandle, action: CoreAction) -> Callback<MouseEvent> {
+fn action_cb(state: &AppHandle, connection: &Connection, action: CoreAction) -> Callback<MouseEvent> {
     let state = state.clone();
-    Callback::from(move |_: MouseEvent| {
-        let state = state.clone();
-        spawn_local(async move { submit_action(&state, action).await });
-    })
+    let connection = connection.clone();
+    Callback::from(move |_: MouseEvent| submit_action(&state, &connection, action))
 }
 
-async fn submit_action(state: &AppHandle, action: CoreAction) {
-    let Some(session) = state.session.clone() else {
-        return;
-    };
-    let Some(lobby) = state.lobby.clone() else {
+fn submit_action(state: &AppHandle, connection: &Connection, action: CoreAction) {
+    let (Some(session), Some(lobby)) = (state.session.clone(), state.lobby.clone()) else {
         return;
     };
     if state.my_move_submitted {
@@ -564,7 +495,6 @@ async fn submit_action(state: &AppHandle, action: CoreAction) {
         return;
     };
     let Ok(game) = herdcore_protocol::game_from_proto(game_proto) else {
-        state.dispatch(AppAction::Status("Invalid game state from server".into()));
         return;
     };
     let Some(player) = lobby
@@ -582,25 +512,12 @@ async fn submit_action(state: &AppHandle, action: CoreAction) {
         state.dispatch(AppAction::Status("Blocked direction—try another move or stay".into()));
         return;
     }
-    let mut client = api::rpc_client();
-    match client
-        .submit_move(v1::SubmitMoveRequest {
-            lobby_id: session.lobby_id,
-            player_id: session.player_id,
-            session_token: session.token,
-            game_id: lobby.game_id,
-            turn: game.turn,
-            action: herdcore_protocol::action_to_proto(action) as i32,
-            request_id: uuid::Uuid::new_v4().to_string(),
-        })
-        .await
-    {
-        Ok(_) => {
-            state.dispatch(AppAction::SetSubmitted(true));
-            state.dispatch(AppAction::Status("Move committed—waiting for the herd".into()));
-        }
-        Err(error) => {
-            state.dispatch(AppAction::Status(format!("Move rejected: {}", error.message())))
-        }
-    }
+    connection.send(frame(client_frame::Body::Move(v1::MoveCommand {
+        game_id: lobby.game_id,
+        turn: game.turn,
+        action: herdcore_protocol::action_to_proto(action) as i32,
+        request_id: uuid::Uuid::new_v4().to_string(),
+    })));
+    state.dispatch(AppAction::SetSubmitted(true));
+    state.dispatch(AppAction::Status("Move committed—waiting for the herd".into()));
 }

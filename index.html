@@ -188,6 +188,18 @@
       .game-row {
         color: var(--ink);
       }
+      .player-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+      .remove-bot {
+        flex: 0 0 auto;
+        font-size: 12px;
+        line-height: 1;
+        padding: 4px 9px;
+      }
       .hint {
         font-size: 9px;
         color: var(--moss);
@@ -198,6 +210,32 @@
         flex-wrap: wrap;
         gap: 8px;
         margin-top: 14px;
+      }
+      /* Bot catalogue: selection of bots on one line. */
+      .bot-row {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        margin-top: 14px;
+      }
+      .bot-btn {
+        flex: 0 0 auto;
+        background: var(--lcd-dim);
+        color: var(--ink);
+        font-size: 10px;
+      }
+      .bot-btn:hover {
+        background: var(--moss);
+        color: var(--lcd);
+      }
+      /* Start / Play Again on its own line at the bottom. */
+      .start-row {
+        margin-top: 12px;
+      }
+      .start-row button {
+        width: 100%;
+        font-size: 13px;
+        padding: 14px;
       }
       #status {
         min-height: 22px;

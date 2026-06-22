@@ -3,4 +3,4 @@ target = "index.html"
 dist = "dist"
 
 [watch]
-ignore = ["crates/server", "crates/bot-provider", "target", "dist"]
+ignore = ["crates/server", "crates/bot", "target", "dist"]

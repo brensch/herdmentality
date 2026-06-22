@@ -1,19 +1,19 @@
-//! Server connection details, the gRPC-web client, and session persistence.
+//! Server connection details and session persistence.
 
-use herdcore_protocol::v1::herdcore_client::HerdcoreClient;
-use tonic_web_wasm_client::Client as GrpcWebClient;
-
-/// Address of the authoritative game server, baked into the wasm bundle so
-/// players never see or type it. Override per deployment by building with
-/// `HERDCORE_WEB_SERVER_URL=https://…`.
-pub const SERVER_URL: &str = match option_env!("HERDCORE_WEB_SERVER_URL") {
+/// WebSocket URL of the game server, baked into the bundle. Override per
+/// deployment with `HERDCORE_WS_URL=wss://…/ws` at build time.
+pub const WS_URL: &str = match option_env!("HERDCORE_WS_URL") {
     Some(url) => url,
-    None => "http://127.0.0.1:55051",
+    None => "ws://127.0.0.1:55051/ws",
 };
 
-const SESSION_KEY: &str = "herdcore.session.v3";
+const SESSION_KEY: &str = "herdcore.session.v4";
 
-/// Everything needed to act as a player in a lobby across reloads.
+pub fn ws_url() -> String {
+    WS_URL.to_owned()
+}
+
+/// Everything needed to re-attach to a lobby across reloads.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Session {
     pub lobby_id: String,
@@ -21,10 +21,6 @@ pub struct Session {
     pub token: String,
     /// The lobby word, used for routing and membership checks.
     pub word: String,
-}
-
-pub fn rpc_client() -> HerdcoreClient<GrpcWebClient> {
-    HerdcoreClient::new(GrpcWebClient::new(SERVER_URL.to_owned()))
 }
 
 pub fn load_session() -> Option<Session> {
