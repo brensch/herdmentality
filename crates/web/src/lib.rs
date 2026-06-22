@@ -4,6 +4,7 @@ mod names;
 mod render;
 mod state;
 mod views;
+mod ws;
 
 use wasm_bindgen::prelude::*;
 

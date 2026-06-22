@@ -1,7 +1,60 @@
+use std::io::{Read, Write};
+
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
 use herdcore_core as core;
+use prost::Message;
 
 pub mod v1 {
-    tonic::include_proto!("herdcore.v1");
+    include!(concat!(env!("OUT_DIR"), "/herdcore.v1.rs"));
+}
+
+/// Frames are protobuf-encoded, then opportunistically deflated. The first byte
+/// flags the payload: `0` = raw protobuf, `1` = deflated protobuf. Deflate is
+/// only kept when it actually shrinks the frame, so tiny frames stay tiny.
+const RAW: u8 = 0;
+const DEFLATED: u8 = 1;
+
+pub fn encode_frame<M: Message>(message: &M) -> Vec<u8> {
+    let raw = message.encode_to_vec();
+    if let Some(deflated) = deflate(&raw) {
+        if deflated.len() + 1 < raw.len() + 1 {
+            let mut out = Vec::with_capacity(deflated.len() + 1);
+            out.push(DEFLATED);
+            out.extend_from_slice(&deflated);
+            return out;
+        }
+    }
+    let mut out = Vec::with_capacity(raw.len() + 1);
+    out.push(RAW);
+    out.extend_from_slice(&raw);
+    out
+}
+
+pub fn decode_frame<M: Message + Default>(bytes: &[u8]) -> Result<M, &'static str> {
+    let (&flag, rest) = bytes.split_first().ok_or("empty frame")?;
+    match flag {
+        RAW => M::decode(rest).map_err(|_| "malformed frame"),
+        DEFLATED => {
+            let inflated = inflate(rest).ok_or("bad compression")?;
+            M::decode(inflated.as_slice()).map_err(|_| "malformed frame")
+        }
+        _ => Err("unknown frame flag"),
+    }
+}
+
+fn deflate(data: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data).ok()?;
+    encoder.finish().ok()
+}
+
+fn inflate(data: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = DeflateDecoder::new(data);
+    let mut out = Vec::new();
+    decoder.read_to_end(&mut out).ok()?;
+    Some(out)
 }
 
 pub fn game_to_proto(state: &core::GameState) -> v1::GameState {

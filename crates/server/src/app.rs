@@ -28,12 +28,13 @@ pub struct App {
     codes: Arc<RwLock<HashMap<String, String>>>,
 }
 
-pub struct BotAssignment {
-    pub snapshot: v1::LobbySnapshot,
+/// Everything an in-process (or recovered) bot client needs to connect over the
+/// WebSocket as its player and play.
+#[derive(Clone)]
+pub struct BotCredentials {
     pub lobby_id: String,
     pub player_id: String,
     pub session_token: String,
-    pub display_name: String,
     pub bot_type_id: String,
 }
 
@@ -63,73 +64,6 @@ impl App {
             }
         }
         Ok(app)
-    }
-
-    pub async fn create_lobby(
-        self: &Arc<Self>,
-        display_name: String,
-        max_players: u8,
-        turn_seconds: u16,
-    ) -> Result<(InternalPlayer, v1::LobbySnapshot)> {
-        validate_name(&display_name)?;
-        if !(herdcore_core::MIN_PLAYERS..=herdcore_core::MAX_PLAYERS).contains(&max_players) {
-            bail!(
-                "max players must be between {} and {}",
-                herdcore_core::MIN_PLAYERS,
-                herdcore_core::MAX_PLAYERS
-            );
-        }
-        if !(3..=300).contains(&turn_seconds) {
-            bail!("turn duration must be between 3 and 300 seconds");
-        }
-
-        let lobby_id = Uuid::new_v4().to_string();
-        let lobby_code = self.unique_lobby_code().await;
-        let host = new_player(display_name, v1::PlayerKind::Human, None);
-        let state = LobbyState {
-            lobby_id: lobby_id.clone(),
-            lobby_code: lobby_code.clone(),
-            phase: v1::LobbyPhase::Waiting,
-            host_player_id: host.player_id.clone(),
-            max_players,
-            turn_seconds,
-            public_version: 1,
-            game_id: 0,
-            deadline_unix_ms: 0,
-            players: vec![host.clone()],
-            game: None,
-            pending: BTreeMap::new(),
-        };
-        self.repository.create_lobby(&state).await?;
-        let snapshot = state.snapshot();
-        let (events, _) = broadcast::channel(128);
-        let lobby = Arc::new(Lobby {
-            state: Mutex::new(state),
-            events,
-        });
-        self.codes
-            .write()
-            .await
-            .insert(lobby_code, lobby_id.clone());
-        self.lobbies.write().await.insert(lobby_id, lobby);
-        Ok((host, snapshot))
-    }
-
-    pub async fn join_lobby(
-        &self,
-        lobby_code: &str,
-        display_name: String,
-    ) -> Result<(InternalPlayer, v1::LobbySnapshot)> {
-        validate_name(&display_name)?;
-        let code = lobby_code.trim().to_ascii_uppercase();
-        let lobby_id = self
-            .codes
-            .read()
-            .await
-            .get(&code)
-            .cloned()
-            .context("lobby not found")?;
-        self.join_existing(&lobby_id, display_name).await
     }
 
     /// Join the lobby that owns `lobby_name`, creating it if no lobby uses that
@@ -263,22 +197,19 @@ impl App {
         Ok(true)
     }
 
+    /// The lobby snapshot plus whether this player has already moved this turn.
     pub async fn get_private_snapshot(
         &self,
         lobby_id: &str,
         player_id: &str,
         token: &str,
-    ) -> Result<v1::PrivateLobbySnapshot> {
+    ) -> Result<(v1::LobbySnapshot, bool)> {
         let lobby = self.lobby(lobby_id).await?;
         let state = lobby.state.lock().await;
         state
             .authenticate(player_id, token)
             .context("unauthorized")?;
-        Ok(v1::PrivateLobbySnapshot {
-            lobby: Some(state.snapshot()),
-            player_id: player_id.to_owned(),
-            my_move_submitted: state.pending.contains_key(player_id),
-        })
+        Ok((state.snapshot(), state.pending.contains_key(player_id)))
     }
 
     pub async fn list_games(
@@ -322,6 +253,7 @@ impl App {
             kind: v1::LobbyEventKind::Snapshot as i32,
             lobby: Some(state.snapshot()),
             moves: Vec::new(),
+            result: None,
         };
         drop(state);
         Ok((lobby, initial))
@@ -378,14 +310,22 @@ impl App {
         Ok(snapshot)
     }
 
+    /// Record a player's move for the current turn. Idempotent per
+    /// `(game, turn, player)`, so a reconnecting client may resubmit safely.
     pub async fn submit_move(
         self: &Arc<Self>,
-        request: v1::SubmitMoveRequest,
-    ) -> Result<v1::SubmitMoveResponse> {
-        let lobby = self.lobby(&request.lobby_id).await?;
+        player_id: &str,
+        token: &str,
+        lobby_id: &str,
+        game_id: u64,
+        turn: u64,
+        action: i32,
+        request_id: &str,
+    ) -> Result<()> {
+        let lobby = self.lobby(lobby_id).await?;
         let mut state = lobby.state.lock().await;
         let player = state
-            .authenticate(&request.player_id, &request.session_token)
+            .authenticate(player_id, token)
             .context("unauthorized")?
             .clone();
         if state.phase != v1::LobbyPhase::Playing {
@@ -395,20 +335,16 @@ impl App {
             bail!("turn deadline has passed");
         }
         let game = state.game.as_ref().context("game state missing")?;
-        if request.game_id != state.game_id || request.turn != game.turn {
+        if game_id != state.game_id || turn != game.turn {
             bail!("stale turn");
         }
-        if request.request_id.is_empty() || request.request_id.len() > 128 {
+        if request_id.is_empty() || request_id.len() > 128 {
             bail!("invalid request id");
         }
-        if state.pending.contains_key(&request.player_id) {
-            return Ok(v1::SubmitMoveResponse {
-                accepted: true,
-                already_submitted: true,
-                turn: game.turn,
-            });
+        if state.pending.contains_key(player_id) {
+            return Ok(());
         }
-        let proto_action = v1::Action::try_from(request.action).context("invalid action")?;
+        let proto_action = v1::Action::try_from(action).context("invalid action")?;
         let action =
             herdcore_protocol::action_from_proto(proto_action).context("action required")?;
         let seat = player.seat.context("player has no seat")?;
@@ -418,28 +354,18 @@ impl App {
         let submitted_turn = game.turn;
         let pending = PendingMove {
             action,
-            request_id: request.request_id,
+            request_id: request_id.to_owned(),
             received_at_ms: now_ms(),
         };
 
         let inserted = self
             .repository
-            .persist_move(
-                &state.lobby_id,
-                state.game_id,
-                submitted_turn,
-                &request.player_id,
-                &pending,
-            )
+            .persist_move(&state.lobby_id, state.game_id, submitted_turn, player_id, &pending)
             .await?;
         if !inserted {
-            return Ok(v1::SubmitMoveResponse {
-                accepted: true,
-                already_submitted: true,
-                turn: game.turn,
-            });
+            return Ok(());
         }
-        state.pending.insert(request.player_id, pending);
+        state.pending.insert(player_id.to_owned(), pending);
         let should_resolve = state.pending.len() == state.players.len();
         let schedule = if should_resolve {
             self.resolve_locked(&lobby, &mut state).await?
@@ -450,35 +376,77 @@ impl App {
         if let Some((game_id, turn, deadline)) = schedule {
             self.schedule_deadline(lobby, game_id, turn, deadline);
         }
-        Ok(v1::SubmitMoveResponse {
-            accepted: true,
-            already_submitted: false,
-            turn: submitted_turn,
-        })
+        Ok(())
     }
 
-    pub async fn add_bot(&self, request: &v1::AddBotRequest) -> Result<BotAssignment> {
-        let lobby = self.lobby(&request.lobby_id).await?;
+    pub async fn add_bot(
+        &self,
+        lobby_id: &str,
+        host_player_id: &str,
+        token: &str,
+        display_name: &str,
+        bot_type_id: &str,
+    ) -> Result<BotCredentials> {
+        let lobby = self.lobby(lobby_id).await?;
         let mut state = lobby.state.lock().await;
-        authenticate_host(&state, &request.player_id, &request.session_token)?;
-        if state.phase != v1::LobbyPhase::Waiting {
-            bail!("bots can only be added before the game");
+        authenticate_host(&state, host_player_id, token)?;
+        // Bots can be added between games (waiting room or after a finished
+        // game), just not while one is in progress.
+        if state.phase == v1::LobbyPhase::Playing {
+            bail!("bots can only be added between games");
         }
         if state.players.len() >= usize::from(state.max_players) {
             bail!("lobby is full");
         }
-        let display_name = if request.display_name.trim().is_empty() {
+        let display_name = if display_name.trim().is_empty() {
             "CPU".to_owned()
         } else {
-            request.display_name.clone()
+            display_name.to_owned()
         };
         validate_name(&display_name)?;
-        let player = new_player(
-            display_name.clone(),
-            v1::PlayerKind::Bot,
-            Some(request.bot_type_id.clone()),
-        );
+        let bot_type_id = if bot_type_id.trim().is_empty() {
+            "greedy-v1".to_owned()
+        } else {
+            bot_type_id.to_owned()
+        };
+        let player = new_player(display_name, v1::PlayerKind::Bot, Some(bot_type_id.clone()));
         state.players.push(player.clone());
+        state.public_version += 1;
+        self.repository.persist_snapshot(&state).await?;
+        send_event(
+            &lobby,
+            v1::LobbyEventKind::LobbyUpdated,
+            state.snapshot(),
+            Vec::new(),
+        );
+        Ok(BotCredentials {
+            lobby_id: state.lobby_id.clone(),
+            player_id: player.player_id,
+            session_token: player.session_token,
+            bot_type_id,
+        })
+    }
+
+    /// Host removes a CPU player from the lobby between games.
+    pub async fn remove_bot(
+        &self,
+        lobby_id: &str,
+        host_player_id: &str,
+        token: &str,
+        bot_player_id: &str,
+    ) -> Result<v1::LobbySnapshot> {
+        let lobby = self.lobby(lobby_id).await?;
+        let mut state = lobby.state.lock().await;
+        authenticate_host(&state, host_player_id, token)?;
+        if state.phase == v1::LobbyPhase::Playing {
+            bail!("players can't be removed mid-game");
+        }
+        let Some(index) = state.players.iter().position(|player| {
+            player.player_id == bot_player_id && player.kind == v1::PlayerKind::Bot
+        }) else {
+            bail!("CPU player not found");
+        };
+        state.players.remove(index);
         state.public_version += 1;
         self.repository.persist_snapshot(&state).await?;
         let snapshot = state.snapshot();
@@ -488,57 +456,22 @@ impl App {
             snapshot.clone(),
             Vec::new(),
         );
-        Ok(BotAssignment {
-            snapshot,
-            lobby_id: state.lobby_id.clone(),
-            player_id: player.player_id,
-            session_token: player.session_token,
-            display_name,
-            bot_type_id: request.bot_type_id.clone(),
-        })
+        Ok(snapshot)
     }
 
-    pub async fn remove_failed_bot(&self, lobby_id: &str, player_id: &str) -> Result<()> {
-        let lobby = self.lobby(lobby_id).await?;
-        let mut state = lobby.state.lock().await;
-        if state.phase != v1::LobbyPhase::Waiting {
-            return Ok(());
-        }
-        let Some(index) = state
-            .players
-            .iter()
-            .position(|player| player.player_id == player_id && player.kind == v1::PlayerKind::Bot)
-        else {
-            return Ok(());
-        };
-        state.players.remove(index);
-        state.public_version += 1;
-        self.repository.persist_snapshot(&state).await?;
-        send_event(
-            &lobby,
-            v1::LobbyEventKind::LobbyUpdated,
-            state.snapshot(),
-            Vec::new(),
-        );
-        Ok(())
-    }
-
-    pub async fn recoverable_bots(&self) -> Vec<BotAssignment> {
+    /// Credentials for every bot in a live lobby, so their clients can be
+    /// (re)spawned after a server restart.
+    pub async fn recoverable_bots(&self) -> Vec<BotCredentials> {
         let lobbies: Vec<Arc<Lobby>> = self.lobbies.read().await.values().cloned().collect();
-        let mut assignments = Vec::new();
+        let mut bots = Vec::new();
         for lobby in lobbies {
             let state = lobby.state.lock().await;
-            if state.phase == v1::LobbyPhase::Finished {
-                continue;
-            }
             for player in &state.players {
                 if player.kind == v1::PlayerKind::Bot {
-                    assignments.push(BotAssignment {
-                        snapshot: state.snapshot(),
+                    bots.push(BotCredentials {
                         lobby_id: state.lobby_id.clone(),
                         player_id: player.player_id.clone(),
                         session_token: player.session_token.clone(),
-                        display_name: player.display_name.clone(),
                         bot_type_id: player
                             .bot_type_id
                             .clone()
@@ -547,7 +480,7 @@ impl App {
                 }
             }
         }
-        assignments
+        bots
     }
 
     async fn resolve_deadline(
@@ -606,11 +539,24 @@ impl App {
         } else {
             candidate.deadline_unix_ms = now_ms() + i64::from(candidate.turn_seconds) * 1000;
         }
+        let result = next_game.game_over.then(|| {
+            let mut scores = vec![0u32; next_game.players.len()];
+            for player in &next_game.players {
+                if let Some(slot) = scores.get_mut(usize::from(player.seat)) {
+                    *slot = u32::from(player.score);
+                }
+            }
+            v1::GameResult {
+                winners: next_game.winners.iter().map(|seat| u32::from(*seat)).collect(),
+                scores,
+            }
+        });
         let event = v1::LobbyEvent {
             version: candidate.public_version,
             kind: v1::LobbyEventKind::TurnResolved as i32,
             lobby: Some(candidate.snapshot()),
             moves: revealed,
+            result,
         };
         let resolved_at = now_ms();
         self.repository
@@ -679,20 +625,6 @@ impl App {
             .context("lobby not found")
     }
 
-    async fn unique_lobby_code(&self) -> String {
-        loop {
-            let code = Uuid::new_v4()
-                .simple()
-                .to_string()
-                .chars()
-                .take(6)
-                .collect::<String>()
-                .to_ascii_uppercase();
-            if !self.codes.read().await.contains_key(&code) {
-                return code;
-            }
-        }
-    }
 }
 
 fn new_player(
@@ -762,6 +694,7 @@ fn send_event(
         kind: kind as i32,
         lobby: Some(snapshot),
         moves,
+        result: None,
     });
 }
 
@@ -783,9 +716,12 @@ mod tests {
         let path = directory.path().join("game.db");
         let repository = Repository::open(path.to_str().unwrap()).await.unwrap();
         let app = App::load(repository).await.unwrap();
-        let (alice, created) = app.create_lobby("Alice".to_owned(), 2, 300).await.unwrap();
+        let (alice, created) = app
+            .join_or_create_lobby("private-room", "Alice".to_owned())
+            .await
+            .unwrap();
         let (bob, _) = app
-            .join_lobby(&created.lobby_code, "Bob".to_owned())
+            .join_or_create_lobby("private-room", "Bob".to_owned())
             .await
             .unwrap();
         let (lobby, _) = app
@@ -799,15 +735,15 @@ mod tests {
             .unwrap();
         let _ = events.recv().await.unwrap();
 
-        app.submit_move(v1::SubmitMoveRequest {
-            lobby_id: created.lobby_id.clone(),
-            player_id: alice.player_id.clone(),
-            session_token: alice.session_token.clone(),
-            game_id: started.game_id,
-            turn: 0,
-            action: v1::Action::Stay as i32,
-            request_id: "alice-turn-zero".to_owned(),
-        })
+        app.submit_move(
+            &alice.player_id,
+            &alice.session_token,
+            &created.lobby_id,
+            started.game_id,
+            0,
+            v1::Action::Stay as i32,
+            "alice-turn-zero",
+        )
         .await
         .unwrap();
         assert!(matches!(
@@ -818,13 +754,13 @@ mod tests {
             app.get_private_snapshot(&created.lobby_id, &alice.player_id, &alice.session_token)
                 .await
                 .unwrap()
-                .my_move_submitted
+                .1
         );
         assert!(
             !app.get_private_snapshot(&created.lobby_id, &bob.player_id, &bob.session_token)
                 .await
                 .unwrap()
-                .my_move_submitted
+                .1
         );
 
         let recovered = Repository::open(path.to_str().unwrap())
@@ -837,15 +773,15 @@ mod tests {
         assert_eq!(recovered[0].pending.len(), 1);
         assert_eq!(recovered[0].pending[&alice.player_id].action, Action::Stay);
 
-        app.submit_move(v1::SubmitMoveRequest {
-            lobby_id: created.lobby_id.clone(),
-            player_id: bob.player_id.clone(),
-            session_token: bob.session_token.clone(),
-            game_id: started.game_id,
-            turn: 0,
-            action: v1::Action::Stay as i32,
-            request_id: "bob-turn-zero".to_owned(),
-        })
+        app.submit_move(
+            &bob.player_id,
+            &bob.session_token,
+            &created.lobby_id,
+            started.game_id,
+            0,
+            v1::Action::Stay as i32,
+            "bob-turn-zero",
+        )
         .await
         .unwrap();
         let resolved = events.recv().await.unwrap();
@@ -907,11 +843,9 @@ mod tests {
             .leave_lobby(&lobby.lobby_id, &alice.player_id, &alice.session_token)
             .await
             .unwrap());
-        let snapshot = app
+        let (snapshot, _) = app
             .get_private_snapshot(&lobby.lobby_id, &bob.player_id, &bob.session_token)
             .await
-            .unwrap()
-            .lobby
             .unwrap();
         assert_eq!(snapshot.host_player_id, bob.player_id);
         assert_eq!(snapshot.players.len(), 1);
@@ -954,6 +888,45 @@ mod tests {
             .unwrap();
         assert_eq!(started.phase, v1::LobbyPhase::Playing as i32);
         assert_eq!(started.game.unwrap().players.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn host_can_add_and_remove_bots_between_games() {
+        let (app, _dir) = test_app().await;
+        let (host, lobby) = app
+            .join_or_create_lobby("bot-room", "Host".to_owned())
+            .await
+            .unwrap();
+        let bot = app
+            .add_bot(
+                &lobby.lobby_id,
+                &host.player_id,
+                &host.session_token,
+                "CPU",
+                "greedy-v1",
+            )
+            .await
+            .unwrap();
+        let (snapshot, _) = app
+            .get_private_snapshot(&lobby.lobby_id, &host.player_id, &host.session_token)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.players.len(), 2);
+
+        let after = app
+            .remove_bot(
+                &lobby.lobby_id,
+                &host.player_id,
+                &host.session_token,
+                &bot.player_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.players.len(), 1);
+        assert!(after
+            .players
+            .iter()
+            .all(|player| player.kind != v1::PlayerKind::Bot as i32));
     }
 
     #[tokio::test]

@@ -2,22 +2,9 @@ syntax = "proto3";
 
 package herdcore.v1;
 
-service Herdcore {
-  rpc CreateLobby(CreateLobbyRequest) returns (JoinLobbyResponse);
-  rpc JoinLobby(JoinLobbyRequest) returns (JoinLobbyResponse);
-  rpc JoinOrCreateLobby(JoinOrCreateLobbyRequest) returns (JoinLobbyResponse);
-  rpc LeaveLobby(LeaveLobbyRequest) returns (LeaveLobbyResponse);
-  rpc GetLobby(GetLobbyRequest) returns (PrivateLobbySnapshot);
-  rpc ListGames(GetLobbyRequest) returns (ListGamesResponse);
-  rpc WatchLobby(WatchLobbyRequest) returns (stream LobbyEvent);
-  rpc StartGame(StartGameRequest) returns (LobbySnapshot);
-  rpc SubmitMove(SubmitMoveRequest) returns (SubmitMoveResponse);
-  rpc AddBot(AddBotRequest) returns (AddBotResponse);
-}
-
-service BotProvider {
-  rpc StartBot(StartBotRequest) returns (StartBotResponse);
-}
+// Herdcore speaks one WebSocket per participant (human or bot). The connection
+// is the session: a client authenticates once with Join/Resume, then sends bare
+// commands. Frames are protobuf-encoded (optionally deflated); there is no gRPC.
 
 enum Action {
   ACTION_UNSPECIFIED = 0;
@@ -99,12 +86,6 @@ message LobbySnapshot {
   optional GameState game = 11;
 }
 
-message PrivateLobbySnapshot {
-  LobbySnapshot lobby = 1;
-  string player_id = 2;
-  bool my_move_submitted = 3;
-}
-
 // One past or in-progress game in a lobby's history.
 message GameSummary {
   uint64 game_id = 1;
@@ -113,113 +94,150 @@ message GameSummary {
   int64 ended_unix_ms = 4;
 }
 
-message ListGamesResponse {
-  repeated GameSummary games = 1;
-}
-
 message RevealedMove {
   string player_id = 1;
   uint32 seat = 2;
   Action action = 3;
 }
 
+// The outcome of a finished game.
+message GameResult {
+  repeated uint32 winners = 1; // winning seats
+  repeated uint32 scores = 2;  // final score per seat, indexed by seat
+}
+
+// Internal fan-out event a lobby broadcasts to its connected participants; the
+// WebSocket layer wraps it into a ServerFrame.Update.
 message LobbyEvent {
   uint64 version = 1;
   LobbyEventKind kind = 2;
   LobbySnapshot lobby = 3;
   repeated RevealedMove moves = 4;
+  GameResult result = 5; // present on the event that ends a game
 }
 
-message CreateLobbyRequest {
-  string display_name = 1;
-  uint32 max_players = 2;
-  uint32 turn_seconds = 3;
+// ---------------------------------------------------------------------------
+// WebSocket frames
+// ---------------------------------------------------------------------------
+
+// Client -> server.
+message ClientFrame {
+  oneof body {
+    Join join = 1;
+    Resume resume = 2;
+    MoveCommand move = 3;
+    StartCommand start = 4;
+    AddBotCommand add_bot = 5;
+    RemoveBotCommand remove_bot = 6;
+    LeaveCommand leave = 7;
+    PingCommand ping = 8;
+    ListGamesCommand list_games = 9;
+    RegisterProvider register_provider = 10;
+  }
 }
 
-message JoinLobbyRequest {
-  string lobby_code = 1;
-  string display_name = 2;
+// A bot service registers as a provider, declaring which catalogue bot it
+// serves; the server then pushes it Assign frames (one per CPU added) and the
+// provider opens a gameplay connection per bot.
+message RegisterProvider {
+  string bot_type_id = 1;
 }
 
-message JoinOrCreateLobbyRequest {
-  // Human-typed lobby word; the server normalizes it to a slug and joins the
-  // matching lobby if one exists, otherwise creates it.
+// One entry in the server's bot catalogue, offered to players as a button.
+message BotKind {
+  string id = 1;      // bot_type_id used when adding this bot
+  string name = 2;    // display name
+  string address = 3; // where the bot lives (informational)
+}
+
+// Join or create a lobby by word, becoming a new participant.
+message Join {
   string lobby_name = 1;
   string display_name = 2;
 }
 
-message LeaveLobbyRequest {
-  string lobby_id = 1;
-  string player_id = 2;
-  string session_token = 3;
-}
-
-message LeaveLobbyResponse {
-  bool left = 1;
-}
-
-message JoinLobbyResponse {
-  string player_id = 1;
-  string session_token = 2;
-  LobbySnapshot lobby = 3;
-}
-
-message GetLobbyRequest {
-  string lobby_id = 1;
-  string player_id = 2;
-  string session_token = 3;
-}
-
-message WatchLobbyRequest {
+// Re-attach an existing session after a reconnect.
+message Resume {
   string lobby_id = 1;
   string player_id = 2;
   string session_token = 3;
   uint64 after_version = 4;
 }
 
-message StartGameRequest {
-  string lobby_id = 1;
-  string player_id = 2;
-  string session_token = 3;
+message MoveCommand {
+  uint64 game_id = 1;
+  uint64 turn = 2;
+  Action action = 3;
+  string request_id = 4;
 }
 
-message SubmitMoveRequest {
-  string lobby_id = 1;
-  string player_id = 2;
-  string session_token = 3;
-  uint64 game_id = 4;
-  uint64 turn = 5;
-  Action action = 6;
-  string request_id = 7;
+message StartCommand {}
+
+message AddBotCommand {
+  string display_name = 1;
+  string bot_type_id = 2; // built-in strategy id, e.g. "greedy-v1"
+  string url = 3;         // non-empty for a remote (pluggable) bot
 }
 
-message SubmitMoveResponse {
-  bool accepted = 1;
-  bool already_submitted = 2;
-  uint64 turn = 3;
+message RemoveBotCommand {
+  string bot_player_id = 1;
 }
 
-message AddBotRequest {
-  string lobby_id = 1;
-  string player_id = 2;
-  string session_token = 3;
-  string bot_type_id = 4;
-  string display_name = 5;
+message LeaveCommand {}
+
+message PingCommand {}
+
+message ListGamesCommand {}
+
+// Server -> client.
+message ServerFrame {
+  oneof body {
+    Welcome welcome = 1;
+    Update update = 2;
+    GamesList games = 3;
+    ServerError error = 4;
+    Bye bye = 5;
+    Pong pong = 6;
+    Assign assign = 7;
+  }
 }
 
-message AddBotResponse {
-  LobbySnapshot lobby = 1;
-}
-
-message StartBotRequest {
+// Sent to a registered provider: play this seat by connecting back as a bot.
+message Assign {
   string game_server_url = 1;
   string lobby_id = 2;
   string player_id = 3;
   string session_token = 4;
   string bot_type_id = 5;
-  string display_name = 6;
 }
 
-message StartBotResponse {
-  string bot_instance_id = 1;
+// Sent right after a successful Join/Resume.
+message Welcome {
+  string player_id = 1;
+  string session_token = 2;
+  LobbySnapshot lobby = 3;
+  bool my_move_submitted = 4;
+  repeated BotKind catalogue = 5; // bots the player can add
 }
+
+// Any lobby/game state change.
+message Update {
+  LobbySnapshot lobby = 1;
+  bool my_move_submitted = 2;
+  LobbyEventKind kind = 3;
+  repeated RevealedMove moves = 4;
+  GameResult result = 5;
+}
+
+message GamesList {
+  repeated GameSummary games = 1;
+}
+
+message ServerError {
+  string message = 1;
+  bool fatal = 2; // true => session is invalid; client should stop reconnecting
+}
+
+message Bye {}
+
+message Pong {}

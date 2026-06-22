@@ -13,6 +13,8 @@ pub struct AppState {
     pub lobby: Option<v1::LobbySnapshot>,
     pub my_move_submitted: bool,
     pub status: String,
+    pub games: Vec<v1::GameSummary>,
+    pub catalogue: Vec<v1::BotKind>,
 }
 
 impl AppState {
@@ -39,23 +41,18 @@ impl AppState {
 }
 
 pub enum AppAction {
-    /// Restore a session loaded from storage (lobby fetched by the watcher).
-    Restore(Session),
-    /// We just joined or created a lobby.
+    /// A Welcome frame: we joined/reconnected and hold a session + snapshot.
     Joined {
         session: Session,
         lobby: v1::LobbySnapshot,
     },
-    /// Authoritative snapshot from `get_lobby`.
-    SetLobby {
-        lobby: v1::LobbySnapshot,
-        my_move_submitted: bool,
-    },
-    /// Streamed update; `reset_submitted` clears our pending move at turn edges.
+    /// An Update frame; `reset_submitted` clears our pending move at turn edges.
     ApplyEvent {
         lobby: v1::LobbySnapshot,
         reset_submitted: bool,
     },
+    SetGames(Vec<v1::GameSummary>),
+    SetCatalogue(Vec<v1::BotKind>),
     Status(String),
     SetSubmitted(bool),
     Cleared,
@@ -67,22 +64,11 @@ impl Reducible for AppState {
     fn reduce(self: Rc<Self>, action: AppAction) -> Rc<Self> {
         let mut next = (*self).clone();
         match action {
-            AppAction::Restore(session) => {
-                next.session = Some(session);
-                next.status = "Reconnecting…".into();
-            }
             AppAction::Joined { session, lobby } => {
                 next.session = Some(session);
                 next.lobby = Some(lobby);
                 next.my_move_submitted = false;
                 next.status = "Connected".into();
-            }
-            AppAction::SetLobby {
-                lobby,
-                my_move_submitted,
-            } => {
-                next.lobby = Some(lobby);
-                next.my_move_submitted = my_move_submitted;
             }
             AppAction::ApplyEvent {
                 lobby,
@@ -96,6 +82,8 @@ impl Reducible for AppState {
                     next.my_move_submitted = false;
                 }
             }
+            AppAction::SetGames(games) => next.games = games,
+            AppAction::SetCatalogue(catalogue) => next.catalogue = catalogue,
             AppAction::Status(message) => next.status = message,
             AppAction::SetSubmitted(value) => next.my_move_submitted = value,
             AppAction::Cleared => next = AppState::default(),
