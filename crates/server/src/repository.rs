@@ -83,6 +83,14 @@ impl Repository {
                     public_version INTEGER NOT NULL,
                     event BLOB NOT NULL,
                     published INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS game_records (
+                    lobby_id TEXT NOT NULL,
+                    game_id INTEGER NOT NULL,
+                    status INTEGER NOT NULL,
+                    winners TEXT NOT NULL DEFAULT '',
+                    ended_unix_ms INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(lobby_id, game_id)
                  );",
             )
             .await?;
@@ -176,6 +184,101 @@ impl Repository {
                         player.bot_type_id.clone(),
                     ],
                 )
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn record_game_started(&self, lobby_id: &str, game_id: u64) -> Result<()> {
+        let connection = self.connection.lock().await;
+        connection
+            .execute(
+                "INSERT INTO game_records (lobby_id, game_id, status, winners, ended_unix_ms)
+                 VALUES (?, ?, ?, '', 0)
+                 ON CONFLICT(lobby_id, game_id) DO UPDATE SET status = excluded.status",
+                params![
+                    lobby_id.to_owned(),
+                    game_id as i64,
+                    v1::LobbyPhase::Playing as i64,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn record_game_finished(
+        &self,
+        lobby_id: &str,
+        game_id: u64,
+        winners: &[u32],
+        ended_unix_ms: i64,
+    ) -> Result<()> {
+        let winners_csv = winners
+            .iter()
+            .map(|seat| seat.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let connection = self.connection.lock().await;
+        connection
+            .execute(
+                "INSERT INTO game_records (lobby_id, game_id, status, winners, ended_unix_ms)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(lobby_id, game_id) DO UPDATE SET
+                 status = excluded.status, winners = excluded.winners,
+                 ended_unix_ms = excluded.ended_unix_ms",
+                params![
+                    lobby_id.to_owned(),
+                    game_id as i64,
+                    v1::LobbyPhase::Finished as i64,
+                    winners_csv,
+                    ended_unix_ms,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_games(&self, lobby_id: &str) -> Result<Vec<crate::model::GameRecord>> {
+        let connection = self.connection.lock().await;
+        let mut rows = connection
+            .query(
+                "SELECT game_id, status, winners, ended_unix_ms FROM game_records
+                 WHERE lobby_id = ? ORDER BY game_id",
+                params![lobby_id.to_owned()],
+            )
+            .await?;
+        let mut games = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let winners_text: String = row.get(2)?;
+            let winners = winners_text
+                .split(',')
+                .filter(|piece| !piece.is_empty())
+                .filter_map(|piece| piece.parse::<u32>().ok())
+                .collect();
+            games.push(crate::model::GameRecord {
+                game_id: row.get::<i64>(0)? as u64,
+                status: row.get::<i64>(1)? as i32,
+                winners,
+                ended_unix_ms: row.get(3)?,
+            });
+        }
+        Ok(games)
+    }
+
+    pub async fn delete_lobby(&self, lobby_id: &str) -> Result<()> {
+        let mut connection = self.connection.lock().await;
+        let transaction = connection.transaction().await?;
+        for statement in [
+            "DELETE FROM game_records WHERE lobby_id = ?",
+            "DELETE FROM outbox_events WHERE lobby_id = ?",
+            "DELETE FROM turn_results WHERE lobby_id = ?",
+            "DELETE FROM move_submissions WHERE lobby_id = ?",
+            "DELETE FROM players WHERE lobby_id = ?",
+            "DELETE FROM lobbies WHERE lobby_id = ?",
+        ] {
+            transaction
+                .execute(statement, params![lobby_id.to_owned()])
                 .await?;
         }
         transaction.commit().await?;

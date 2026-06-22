@@ -68,12 +68,12 @@ fn evaluate(state: &GameState, seat: SeatId) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::initial_state_for_players;
+    use crate::{initial_state_for_players, MAX_PLAYERS};
 
     #[test]
     fn bot_is_deterministic_for_every_seat() {
-        let state = initial_state_for_players(16).unwrap();
-        for seat in 0..16 {
+        let state = initial_state_for_players(MAX_PLAYERS).unwrap();
+        for seat in 0..MAX_PLAYERS {
             assert_eq!(choose_action(&state, seat), choose_action(&state, seat));
         }
     }
