@@ -10,6 +10,12 @@ use crate::state::{AppHandle, AppState};
 use crate::views::{GameView, Header, Home, LobbyView, StatusFooter};
 use crate::ws::Connection;
 
+type GameKey = (String, String, u64);
+
+fn is_new_game(last: &Option<GameKey>, next: &GameKey) -> bool {
+    last.as_ref() != Some(next)
+}
+
 /// `/l/:lobby` is the lobby (roster + game history); a live game lives at
 /// `/l/:lobby/g/:game`, so Back returns to the lobby.
 #[derive(Clone, Routable, PartialEq)]
@@ -78,13 +84,17 @@ fn nav_controller() -> Html {
     let state = use_context::<AppHandle>().expect("app context");
     let navigator = use_navigator().expect("navigator");
     let route = use_route::<Route>();
-    let last_game = use_mut_ref(|| 0u64);
+    // A game number is only unique inside one lobby. Include the player session
+    // too, so leaving and rejoining a still-running lobby is a new navigation
+    // edge while using Back during the same session still stays in the lobby.
+    let last_game = use_mut_ref(|| None::<GameKey>);
 
     use_effect(move || {
         if let (Some(session), Some(lobby)) = (state.session.as_ref(), state.lobby.as_ref()) {
             let word = session.word.clone();
             let playing = lobby.phase == v1::LobbyPhase::Playing as i32 && lobby.game.is_some();
             let game_id = lobby.game_id;
+            let game_key = (session.player_id.clone(), lobby.lobby_id.clone(), game_id);
 
             let acceptable = match &route {
                 Some(Route::Lobby { lobby }) => *lobby == word,
@@ -92,8 +102,8 @@ fn nav_controller() -> Html {
                 _ => false,
             };
 
-            if playing && game_id > *last_game.borrow() {
-                *last_game.borrow_mut() = game_id;
+            if playing && is_new_game(&last_game.borrow(), &game_key) {
+                *last_game.borrow_mut() = Some(game_key);
                 let desired = Route::Game {
                     lobby: word.clone(),
                     game: game_id,
@@ -118,4 +128,27 @@ fn nav_controller() -> Html {
     });
 
     Html::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_new_game, GameKey};
+
+    #[test]
+    fn game_navigation_is_scoped_to_lobby_and_session() {
+        let previous: Option<GameKey> = Some(("player-a".into(), "lobby-a".into(), 1));
+
+        assert!(!is_new_game(
+            &previous,
+            &("player-a".into(), "lobby-a".into(), 1)
+        ));
+        assert!(is_new_game(
+            &previous,
+            &("player-b".into(), "lobby-b".into(), 1)
+        ));
+        assert!(is_new_game(
+            &previous,
+            &("player-b".into(), "lobby-a".into(), 1)
+        ));
+    }
 }

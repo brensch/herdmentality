@@ -99,7 +99,9 @@ async fn handle_socket(mut socket: WebSocket, state: WsState) {
         Some(Established::Provider(bot_type_id)) => {
             run_provider(socket, state, bot_type_id).await
         }
-        Some(Established::Session(session)) => run_session(socket, state, session).await,
+        Some(Established::Session(session, events)) => {
+            run_session(socket, state, session, events).await
+        }
         None => {}
     }
 }
@@ -148,17 +150,12 @@ async fn run_provider(mut socket: WebSocket, state: WsState, bot_type_id: String
     state.providers.unregister(id).await;
 }
 
-async fn run_session(mut socket: WebSocket, state: WsState, session: Session) {
-    // Subscribe before relaying so we don't miss events; the snapshot already
-    // sent in Welcome is authoritative for catch-up.
-    let Ok((lobby, _)) = state
-        .app
-        .watch_lobby(&session.lobby_id, &session.player_id, &session.token)
-        .await
-    else {
-        return;
-    };
-    let mut events = lobby.events.subscribe();
+async fn run_session(
+    mut socket: WebSocket,
+    state: WsState,
+    session: Session,
+    mut events: broadcast::Receiver<LobbyBroadcast>,
+) {
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     heartbeat.tick().await;
 
@@ -211,7 +208,7 @@ async fn run_session(mut socket: WebSocket, state: WsState, session: Session) {
 
 enum Established {
     Provider(String),
-    Session(Session),
+    Session(Session, broadcast::Receiver<LobbyBroadcast>),
 }
 
 /// Phase 1: read the opening frame — a provider registration, or a Join/Resume
@@ -239,8 +236,27 @@ async fn establish(socket: &mut WebSocket, state: &WsState) -> Option<Establishe
                                     player_id: player.player_id.clone(),
                                     token: player.session_token.clone(),
                                 };
-                                let _ = send(socket, welcome_frame(&session, snapshot, false, &state.catalogue)).await;
-                                return Some(Established::Session(session));
+                                let Ok((events, snapshot, submitted)) = state
+                                    .app
+                                    .watch_lobby(
+                                        &session.lobby_id,
+                                        &session.player_id,
+                                        &session.token,
+                                    )
+                                    .await
+                                else {
+                                    return None;
+                                };
+                                if send(
+                                    socket,
+                                    welcome_frame(&session, snapshot, submitted, &state.catalogue),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    return None;
+                                }
+                                return Some(Established::Session(session, events));
                             }
                             Err(error) => {
                                 let _ = send(socket, error_frame(&error.to_string(), false)).await;
@@ -250,21 +266,29 @@ async fn establish(socket: &mut WebSocket, state: &WsState) -> Option<Establishe
                     Some(client_frame::Body::Resume(resume)) => {
                         match state
                             .app
-                            .get_private_snapshot(
+                            .watch_lobby(
                                 &resume.lobby_id,
                                 &resume.player_id,
                                 &resume.session_token,
                             )
                             .await
                         {
-                            Ok((snapshot, submitted)) => {
+                            Ok((events, snapshot, submitted)) => {
                                 let session = Session {
                                     lobby_id: resume.lobby_id,
                                     player_id: resume.player_id,
                                     token: resume.session_token,
                                 };
-                                let _ = send(socket, welcome_frame(&session, snapshot, submitted, &state.catalogue)).await;
-                                return Some(Established::Session(session));
+                                if send(
+                                    socket,
+                                    welcome_frame(&session, snapshot, submitted, &state.catalogue),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    return None;
+                                }
+                                return Some(Established::Session(session, events));
                             }
                             Err(_) => {
                                 let _ = send(socket, error_frame("session expired", true)).await;

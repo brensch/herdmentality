@@ -45,9 +45,15 @@ struct Inner {
     socket: Option<WebSocket>,
     intent: Option<Intent>,
     session: Option<Session>,
+    /// True only after this socket's Join/Resume has received Welcome.
+    established: bool,
+    /// Commands issued while reconnecting. They are flushed after Welcome, so
+    /// the server never receives them before the session is authenticated.
+    pending: Vec<v1::ClientFrame>,
     stopped: bool,
     backoff_ms: u32,
     generation: u64,
+    reconnect_scheduled_for: Option<u64>,
     last_frame_ms: f64,
     // Closures must outlive the socket that references them.
     keepalive: Vec<Closure<dyn FnMut(JsEvent)>>,
@@ -76,9 +82,12 @@ impl Connection {
                 socket: None,
                 intent: None,
                 session: None,
+                established: false,
+                pending: Vec::new(),
                 stopped: true,
                 backoff_ms: MIN_BACKOFF_MS,
                 generation: 0,
+                reconnect_scheduled_for: None,
                 last_frame_ms: now(),
                 keepalive: Vec::new(),
             })),
@@ -90,29 +99,49 @@ impl Connection {
 
     /// Join or create a lobby by word as a fresh participant.
     pub fn join(&self, lobby_name: String, display_name: String) {
-        self.inner.borrow_mut().intent = Some(Intent::Join {
+        let mut inner = self.inner.borrow_mut();
+        inner.intent = Some(Intent::Join {
             lobby_name,
             display_name,
         });
-        self.inner.borrow_mut().session = None;
+        inner.session = None;
+        inner.established = false;
+        inner.pending.clear();
+        drop(inner);
         self.start();
     }
 
     /// Re-attach to an existing session (page load with a stored session).
     pub fn resume(&self, session: Session) {
-        self.inner.borrow_mut().session = Some(session.clone());
-        self.inner.borrow_mut().intent = Some(Intent::Resume(session));
+        let mut inner = self.inner.borrow_mut();
+        inner.session = Some(session.clone());
+        inner.intent = Some(Intent::Resume(session));
+        inner.established = false;
+        drop(inner);
         self.start();
     }
 
-    /// Send a command frame if the socket is open (dropped otherwise — the next
-    /// reconnect resyncs, and game commands are idempotent server-side).
+    /// Send a command on an authenticated socket, or retain it until reconnect
+    /// completes. This prevents UI actions from disappearing during a brief
+    /// disconnect while the last authoritative lobby snapshot is still shown.
     pub fn send(&self, frame: v1::ClientFrame) {
-        let inner = self.inner.borrow();
-        if let Some(socket) = &inner.socket {
-            if socket.ready_state() == WebSocket::OPEN {
-                let _ = socket.send_with_u8_array(&encode_frame(&frame));
-            }
+        let mut inner = self.inner.borrow_mut();
+        let sent = inner.established
+            && inner.socket.as_ref().is_some_and(|socket| {
+                socket.ready_state() == WebSocket::OPEN
+                    && socket
+                        .send_with_u8_array(&encode_frame(&frame))
+                        .is_ok()
+            });
+        if !sent {
+            enqueue(&mut inner.pending, frame);
+        }
+        let app = (!sent && !inner.stopped).then(|| inner.app.clone());
+        drop(inner);
+        if let Some(app) = app {
+            app.dispatch(AppAction::Status(
+                "Reconnecting — your action will be sent automatically".into(),
+            ));
         }
     }
 
@@ -138,6 +167,9 @@ impl Connection {
         inner.stopped = true;
         inner.intent = None;
         inner.session = None;
+        inner.established = false;
+        inner.pending.clear();
+        inner.reconnect_scheduled_for = None;
         if let Some(socket) = inner.socket.take() {
             clear_handlers(&socket);
             let _ = socket.close();
@@ -155,6 +187,8 @@ impl Connection {
                 let _ = socket.close();
             }
             inner.generation += 1;
+            inner.established = false;
+            inner.reconnect_scheduled_for = None;
             inner.last_frame_ms = now();
             (inner.url.clone(), inner.generation)
         };
@@ -229,7 +263,21 @@ impl Connection {
                 None => return,
             }
         };
-        self.send(frame);
+        // Opening frames must bypass the authenticated-command outbox: Welcome
+        // is what marks this socket established.
+        let failed = {
+            let inner = self.inner.borrow();
+            inner.generation != generation
+                || inner.socket.as_ref().is_none_or(|socket| {
+                    socket.ready_state() != WebSocket::OPEN
+                        || socket
+                            .send_with_u8_array(&encode_frame(&frame))
+                            .is_err()
+                })
+        };
+        if failed {
+            self.on_disconnect(generation);
+        }
     }
 
     fn on_message(&self, event: MessageEvent) {
@@ -253,9 +301,11 @@ impl Connection {
                         let mut inner = self.inner.borrow_mut();
                         inner.session = Some(session.clone());
                         inner.intent = Some(Intent::Resume(session.clone()));
+                        inner.established = true;
                     }
                     app.dispatch(AppAction::Joined { session, lobby });
                     app.dispatch(AppAction::SetCatalogue(welcome.catalogue));
+                    self.flush_pending();
                     // Refresh the games list on (re)connect.
                     self.send(client(client_frame::Body::ListGames(v1::ListGamesCommand {})));
                 }
@@ -303,10 +353,11 @@ impl Connection {
 
     fn on_disconnect(&self, generation: u64) {
         {
-            let inner = self.inner.borrow();
+            let mut inner = self.inner.borrow_mut();
             if inner.stopped || inner.generation != generation {
                 return;
             }
+            inner.established = false;
         }
         self.schedule_reconnect();
     }
@@ -317,14 +368,42 @@ impl Connection {
             if inner.stopped {
                 return;
             }
+            let generation = inner.generation;
+            if inner.reconnect_scheduled_for == Some(generation) {
+                return;
+            }
+            inner.reconnect_scheduled_for = Some(generation);
             let base = inner.backoff_ms;
             inner.backoff_ms = (base.saturating_mul(2)).min(MAX_BACKOFF_MS);
             // jitter: 50%..100% of base, so reconnects don't thunder together.
             let jitter = (js_sys::Math::random() * 0.5 + 0.5) * f64::from(base);
-            jitter as u32
+            (jitter as u32, generation)
         };
+        let (delay, generation) = delay;
         let this = self.clone();
-        gloo_timers::callback::Timeout::new(delay, move || this.connect()).forget();
+        gloo_timers::callback::Timeout::new(delay, move || {
+            let should_reconnect = {
+                let mut inner = this.inner.borrow_mut();
+                let should = !inner.stopped
+                    && inner.generation == generation
+                    && inner.reconnect_scheduled_for == Some(generation);
+                if should {
+                    inner.reconnect_scheduled_for = None;
+                }
+                should
+            };
+            if should_reconnect {
+                this.connect();
+            }
+        })
+        .forget();
+    }
+
+    fn flush_pending(&self) {
+        let pending = std::mem::take(&mut self.inner.borrow_mut().pending);
+        for frame in pending {
+            self.send(frame);
+        }
     }
 
     fn start_watchdog(&self) {
@@ -374,6 +453,32 @@ impl Connection {
     }
 }
 
+/// Coalesce snapshot requests and Start clicks while disconnected. Other
+/// commands retain their order; move commands already carry request IDs.
+fn enqueue(pending: &mut Vec<v1::ClientFrame>, frame: v1::ClientFrame) {
+    let singleton = matches!(
+        &frame.body,
+        Some(client_frame::Body::Start(_)) | Some(client_frame::Body::ListGames(_))
+    );
+    if singleton
+        && pending.iter().any(|queued| {
+            matches!(
+                (&queued.body, &frame.body),
+                (
+                    Some(client_frame::Body::Start(_)),
+                    Some(client_frame::Body::Start(_))
+                ) | (
+                    Some(client_frame::Body::ListGames(_)),
+                    Some(client_frame::Body::ListGames(_))
+                )
+            )
+        })
+    {
+        return;
+    }
+    pending.push(frame);
+}
+
 fn client(body: client_frame::Body) -> v1::ClientFrame {
     v1::ClientFrame { body: Some(body) }
 }
@@ -387,4 +492,41 @@ fn clear_handlers(socket: &WebSocket) {
 
 fn now() -> f64 {
     js_sys::Date::now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client, enqueue};
+    use herdcore_protocol::v1::{self, client_frame};
+
+    #[test]
+    fn disconnected_start_and_list_requests_are_coalesced() {
+        let mut pending = Vec::new();
+        enqueue(
+            &mut pending,
+            client(client_frame::Body::Start(v1::StartCommand {})),
+        );
+        enqueue(
+            &mut pending,
+            client(client_frame::Body::Start(v1::StartCommand {})),
+        );
+        enqueue(
+            &mut pending,
+            client(client_frame::Body::ListGames(v1::ListGamesCommand {})),
+        );
+        enqueue(
+            &mut pending,
+            client(client_frame::Body::ListGames(v1::ListGamesCommand {})),
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert!(matches!(
+            &pending[0].body,
+            Some(client_frame::Body::Start(_))
+        ));
+        assert!(matches!(
+            &pending[1].body,
+            Some(client_frame::Body::ListGames(_))
+        ));
+    }
 }

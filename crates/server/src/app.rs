@@ -250,21 +250,20 @@ impl App {
         lobby_id: &str,
         player_id: &str,
         token: &str,
-    ) -> Result<(Arc<Lobby>, v1::LobbyEvent)> {
+    ) -> Result<(broadcast::Receiver<LobbyBroadcast>, v1::LobbySnapshot, bool)> {
         let lobby = self.lobby(lobby_id).await?;
+        // Subscribe before taking the snapshot. A concurrent mutation is then
+        // represented either by the snapshot or by a queued event (possibly
+        // both), but can never fall into a snapshot/subscription gap.
+        let events = lobby.events.subscribe();
         let state = lobby.state.lock().await;
         state
             .authenticate(player_id, token)
             .context("unauthorized")?;
-        let initial = v1::LobbyEvent {
-            version: state.public_version,
-            kind: v1::LobbyEventKind::Snapshot as i32,
-            lobby: Some(state.snapshot()),
-            moves: Vec::new(),
-            result: None,
-        };
+        let snapshot = state.snapshot();
+        let submitted = state.pending.contains_key(player_id);
         drop(state);
-        Ok((lobby, initial))
+        Ok((events, snapshot, submitted))
     }
 
     pub async fn start_game(
@@ -738,11 +737,10 @@ mod tests {
             .join_or_create_lobby("private-room", "Bob".to_owned())
             .await
             .unwrap();
-        let (lobby, _) = app
+        let (mut events, _, _) = app
             .watch_lobby(&created.lobby_id, &alice.player_id, &alice.session_token)
             .await
             .unwrap();
-        let mut events = lobby.events.subscribe();
         let started = app
             .start_game(&created.lobby_id, &alice.player_id, &alice.session_token)
             .await
