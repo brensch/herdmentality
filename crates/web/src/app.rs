@@ -7,7 +7,7 @@ use yew_router::prelude::*;
 
 use crate::api;
 use crate::state::{AppHandle, AppState};
-use crate::views::{GameView, Header, Home, LobbyView};
+use crate::views::{GameView, Header, Home, LobbyView, StatusFooter};
 use crate::ws::Connection;
 
 /// `/l/:lobby` is the lobby (roster + game history); a live game lives at
@@ -54,6 +54,7 @@ pub fn app() -> Html {
                     <Header />
                     <NavController />
                     <Switch<Route> render={switch} />
+                    <StatusFooter />
                 </BrowserRouter>
             </ContextProvider<Connection>>
         </ContextProvider<AppHandle>>

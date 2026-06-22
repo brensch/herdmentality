@@ -71,6 +71,12 @@ impl LobbyState {
                 })
                 .collect(),
             game: self.game.as_ref().map(game_to_proto),
+            submitted_seats: self
+                .players
+                .iter()
+                .filter(|player| self.pending.contains_key(&player.player_id))
+                .filter_map(|player| player.seat.map(u32::from))
+                .collect(),
         }
     }
 

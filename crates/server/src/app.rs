@@ -18,7 +18,15 @@ const DEFAULT_TURN_SECONDS: u16 = 20;
 
 pub struct Lobby {
     pub state: Mutex<LobbyState>,
-    pub events: broadcast::Sender<v1::LobbyEvent>,
+    pub events: broadcast::Sender<LobbyBroadcast>,
+}
+
+/// What a lobby fans out to its connected participants. Full `Event`s carry a
+/// snapshot; `Moved` is a tiny per-submission notice (who moved, by seat).
+#[derive(Clone)]
+pub enum LobbyBroadcast {
+    Event(v1::LobbyEvent),
+    Moved { game_id: u64, turn: u64, seat: u32 },
 }
 
 #[derive(Clone)]
@@ -366,6 +374,12 @@ impl App {
             return Ok(());
         }
         state.pending.insert(player_id.to_owned(), pending);
+        // Tell everyone this seat has moved (not what it played).
+        let _ = lobby.events.send(LobbyBroadcast::Moved {
+            game_id: state.game_id,
+            turn: submitted_turn,
+            seat: u32::from(seat),
+        });
         let should_resolve = state.pending.len() == state.players.len();
         let schedule = if should_resolve {
             self.resolve_locked(&lobby, &mut state).await?
@@ -563,7 +577,7 @@ impl App {
             .persist_resolution(&candidate, resolved_turn, &event, resolved_at)
             .await?;
         *state = candidate;
-        let _ = lobby.events.send(event);
+        let _ = lobby.events.send(LobbyBroadcast::Event(event));
         if let Err(error) = self
             .repository
             .mark_event_published(&state.lobby_id, state.public_version)
@@ -689,13 +703,13 @@ fn send_event(
     snapshot: v1::LobbySnapshot,
     moves: Vec<v1::RevealedMove>,
 ) {
-    let _ = lobby.events.send(v1::LobbyEvent {
+    let _ = lobby.events.send(LobbyBroadcast::Event(v1::LobbyEvent {
         version: snapshot.public_version,
         kind: kind as i32,
         lobby: Some(snapshot),
         moves,
         result: None,
-    });
+    }));
 }
 
 pub fn now_ms() -> i64 {
@@ -746,6 +760,12 @@ mod tests {
         )
         .await
         .unwrap();
+        // Alice's submit reveals only that she moved (a Moved notice), never the
+        // action, and does not resolve the turn while Bob is still out.
+        assert!(matches!(
+            events.try_recv(),
+            Ok(LobbyBroadcast::Moved { .. })
+        ));
         assert!(matches!(
             events.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
@@ -784,7 +804,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let resolved = events.recv().await.unwrap();
+        // Bob's submit: his Moved notice, then the atomic turn resolution.
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            LobbyBroadcast::Moved { .. }
+        ));
+        let resolved = match events.recv().await.unwrap() {
+            LobbyBroadcast::Event(event) => event,
+            other @ LobbyBroadcast::Moved { .. } => {
+                let _ = other;
+                panic!("expected turn resolution")
+            }
+        };
         assert_eq!(resolved.kind, v1::LobbyEventKind::TurnResolved as i32);
         assert_eq!(resolved.moves.len(), 2);
         assert_eq!(resolved.lobby.unwrap().game.unwrap().turn, 1);

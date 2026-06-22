@@ -84,6 +84,9 @@ message LobbySnapshot {
   int64 deadline_unix_ms = 9;
   repeated LobbyPlayer players = 10;
   optional GameState game = 11;
+  // Seats that have submitted a move for the current turn (compact: seats, not
+  // player ids; the action stays hidden). Lets clients show who has moved.
+  repeated uint32 submitted_seats = 12;
 }
 
 // One past or in-progress game in a lobby's history.
@@ -199,7 +202,16 @@ message ServerFrame {
     Bye bye = 5;
     Pong pong = 6;
     Assign assign = 7;
+    Moved moved = 8;
   }
+}
+
+// Broadcast when a player submits a move: reveals who moved (by seat) for the
+// current turn, not what. Tiny by design — sent once per player per turn.
+message Moved {
+  uint64 game_id = 1;
+  uint64 turn = 2;
+  uint32 seat = 3;
 }
 
 // Sent to a registered provider: play this seat by connecting back as a bot.

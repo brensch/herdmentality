@@ -12,7 +12,7 @@ use herdcore_protocol::v1::{client_frame, server_frame};
 use herdcore_protocol::{decode_frame, encode_frame, v1};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::app::{App, BotCredentials};
+use crate::app::{App, BotCredentials, LobbyBroadcast};
 
 #[derive(Clone)]
 pub struct WsState {
@@ -173,8 +173,13 @@ async fn run_session(mut socket: WebSocket, state: WsState, session: Session) {
                 _ => {}
             },
             event = events.recv() => match event {
-                Ok(event) => {
+                Ok(LobbyBroadcast::Event(event)) => {
                     if send(&mut socket, update_frame(event)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(LobbyBroadcast::Moved { game_id, turn, seat }) => {
+                    if send(&mut socket, moved_frame(game_id, turn, seat)).await.is_err() {
                         break;
                     }
                 }
@@ -437,6 +442,14 @@ fn update_frame(event: v1::LobbyEvent) -> v1::ServerFrame {
         kind: event.kind,
         moves: event.moves,
         result: event.result,
+    }))
+}
+
+fn moved_frame(game_id: u64, turn: u64, seat: u32) -> v1::ServerFrame {
+    server(server_frame::Body::Moved(v1::Moved {
+        game_id,
+        turn,
+        seat,
     }))
 }
 

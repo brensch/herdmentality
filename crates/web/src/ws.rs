@@ -255,7 +255,6 @@ impl Connection {
                         inner.intent = Some(Intent::Resume(session.clone()));
                     }
                     app.dispatch(AppAction::Joined { session, lobby });
-                    app.dispatch(AppAction::SetSubmitted(welcome.my_move_submitted));
                     app.dispatch(AppAction::SetCatalogue(welcome.catalogue));
                     // Refresh the games list on (re)connect.
                     self.send(client(client_frame::Body::ListGames(v1::ListGamesCommand {})));
@@ -273,6 +272,13 @@ impl Connection {
             }
             Some(server_frame::Body::Games(list)) => {
                 app.dispatch(AppAction::SetGames(list.games));
+            }
+            Some(server_frame::Body::Moved(moved)) => {
+                app.dispatch(AppAction::Moved {
+                    game_id: moved.game_id,
+                    turn: moved.turn,
+                    seat: moved.seat,
+                });
             }
             Some(server_frame::Body::Error(error)) => {
                 if error.fatal {

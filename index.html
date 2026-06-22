@@ -237,27 +237,66 @@
         font-size: 13px;
         padding: 14px;
       }
+      /* Transient status, pinned to the bottom of the page. */
       #status {
-        min-height: 22px;
-        font-size: 10px;
-        color: var(--ink);
-        background: var(--lcd-dim);
-        border: 3px solid var(--ink);
-        padding: 10px 12px;
-        margin: 10px auto;
+        font-size: 9px;
+        color: var(--moss);
+        margin: 14px auto 0;
         width: min(560px, calc(100vw - 20px));
         text-align: center;
         word-break: break-word;
       }
       #hud {
-        font-size: 10px;
+        width: min(560px, calc(100vw - 20px));
+        margin: 8px auto 6px;
+      }
+      .hud-line {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 14px;
+        font-size: 11px;
         color: var(--ink);
         letter-spacing: 1px;
-        line-height: 1.8;
-        text-align: center;
-        margin: 8px auto 6px;
-        width: min(560px, calc(100vw - 20px));
-        word-break: break-word;
+      }
+      .clock {
+        font-size: 18px;
+        color: var(--ink);
+      }
+      .sheep {
+        color: var(--moss);
+      }
+      .scoreboard {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .chip {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 9px;
+        padding: 5px 8px;
+        background: var(--lcd-dim);
+        border: 2px solid var(--lcd-dim);
+        color: var(--ink);
+      }
+      .chip.you {
+        border-color: var(--ink);
+      }
+      .chip .dot {
+        width: 9px;
+        height: 9px;
+        border: 2px solid var(--ink);
+        background: transparent;
+      }
+      .chip .dot.moved {
+        background: var(--ink);
+      }
+      .chip .pscore {
+        font-weight: bold;
       }
       /* Gameboy D-pad: arrows on a cross with STAY in the middle. */
       #controls {

@@ -19,26 +19,6 @@ const SEAT_SHADES: [&str; 8] = [
     "#0f380f", "#306230", "#557a14", "#83a012", "#23491a", "#638716", "#739416", "#456b16",
 ];
 
-/// Compact play HUD text: turn, sheep left, and scores with the local player
-/// starred.
-pub fn hud_text(game: &GameState, my_seat: Option<u32>) -> String {
-    let scores = game
-        .players
-        .iter()
-        .map(|player| {
-            let you = Some(u32::from(player.seat)) == my_seat;
-            format!(
-                "{}{}:{}",
-                if you { "*" } else { "P" },
-                u32::from(player.seat) + 1,
-                player.score
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    format!("TURN {}   SHEEP {}   {}", game.turn, game.sheep.len(), scores)
-}
-
 pub fn render_game(
     canvas: &HtmlCanvasElement,
     game: &GameState,

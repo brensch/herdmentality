@@ -50,24 +50,27 @@ fn prefill(node: &NodeRef, value: String) {
 
 #[function_component(Header)]
 pub fn header() -> Html {
-    let state = use_context::<AppHandle>().expect("app context");
     let connection = use_context::<Connection>().expect("connection");
     let navigator = use_navigator().expect("navigator");
 
-    let on_home = {
-        let connection = connection.clone();
-        Callback::from(move |_: MouseEvent| {
-            connection.leave();
-            navigator.push(&crate::app::Route::Home);
-        })
-    };
+    let on_home = Callback::from(move |_: MouseEvent| {
+        connection.leave();
+        navigator.push(&crate::app::Route::Home);
+    });
 
     html! {
-        <>
-            <h1 id="home" title="Leave and go home" onclick={on_home}>{ "HERDCORE" }</h1>
-            <div id="status">{ state.status.clone() }</div>
-        </>
+        <h1 id="home" title="Leave and go home" onclick={on_home}>{ "HERDCORE" }</h1>
     }
+}
+
+/// The transient status line, rendered at the bottom of the page.
+#[function_component(StatusFooter)]
+pub fn status_footer() -> Html {
+    let state = use_context::<AppHandle>().expect("app context");
+    if state.status.is_empty() {
+        return Html::default();
+    }
+    html! { <div id="status">{ state.status.clone() }</div> }
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +448,14 @@ pub fn game_view(props: &GameProps) -> Html {
         });
     }
 
+    // Re-render every second so the move clock counts down.
+    let ticker = use_force_update();
+    use_effect_with((), move |_| {
+        let interval =
+            gloo_timers::callback::Interval::new(1000, move || ticker.force_update());
+        move || drop(interval)
+    });
+
     if !state.is_member_of(&word) {
         return html! { <JoinPanel lobby={word} /> };
     }
@@ -454,18 +465,24 @@ pub fn game_view(props: &GameProps) -> Html {
         .as_ref()
         .is_some_and(|l| l.phase == v1::LobbyPhase::Playing as i32);
     let have_seat = state.my_seat().is_some();
-    let disabled = state.my_move_submitted || !playing || !have_seat;
+    let disabled = state.has_moved() || !playing || !have_seat;
 
-    let hud = lobby
+    let game = lobby
         .as_ref()
         .and_then(|l| l.game.as_ref())
-        .and_then(|g| herdcore_protocol::game_from_proto(g).ok())
-        .map(|game| render::hud_text(&game, state.my_seat()))
-        .unwrap_or_default();
+        .and_then(|g| herdcore_protocol::game_from_proto(g).ok());
+    let deadline = lobby.as_ref().map(|l| l.deadline_unix_ms).unwrap_or(0);
+    let remaining = if playing && deadline > 0 {
+        (((deadline as f64) - js_sys::Date::now()) / 1000.0).ceil().max(0.0) as i64
+    } else {
+        0
+    };
 
     html! {
         <>
-            <div id="hud">{ hud }</div>
+            <div id="hud">
+                { hud_view(game.as_ref(), lobby.as_ref(), &state.moved_seats, state.my_seat(), playing, remaining) }
+            </div>
             <canvas id="game" ref={canvas_ref} aria-label="Herdcore game board"></canvas>
             <div id="controls">
                 <button id="up" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Up)} aria-label="Up"></button>
@@ -473,6 +490,49 @@ pub fn game_view(props: &GameProps) -> Html {
                 <button id="stay" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Stay)}>{ "STAY" }</button>
                 <button id="right" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Right)} aria-label="Right"></button>
                 <button id="down" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Down)} aria-label="Down"></button>
+            </div>
+        </>
+    }
+}
+
+/// The play HUD: a move clock, sheep remaining, and a scoreboard chip per
+/// player showing a filled dot when they've moved this turn, plus their score.
+fn hud_view(
+    game: Option<&herdcore_core::GameState>,
+    lobby: Option<&v1::LobbySnapshot>,
+    moved_seats: &[u32],
+    my_seat: Option<u32>,
+    playing: bool,
+    remaining: i64,
+) -> Html {
+    let Some(game) = game else {
+        return Html::default();
+    };
+    html! {
+        <>
+            <div class="hud-line">
+                if playing {
+                    <span class="clock">{ format!("{remaining}s") }</span>
+                }
+                <span class="sheep">{ format!("{} sheep", game.sheep.len()) }</span>
+            </div>
+            <div class="scoreboard">
+                { for game.players.iter().map(|player| {
+                    let seat = u32::from(player.seat);
+                    let moved = moved_seats.contains(&seat);
+                    let you = my_seat == Some(seat);
+                    let name = lobby
+                        .and_then(|l| l.players.iter().find(|p| p.seat == Some(seat)))
+                        .map(|p| p.display_name.clone())
+                        .unwrap_or_else(|| format!("P{}", seat + 1));
+                    html! {
+                        <div class={classes!("chip", you.then_some("you"))}>
+                            <span class={classes!("dot", moved.then_some("moved"))}></span>
+                            <span class="pname">{ name }</span>
+                            <span class="pscore">{ player.score }</span>
+                        </div>
+                    }
+                }) }
             </div>
         </>
     }
@@ -488,7 +548,7 @@ fn submit_action(state: &AppHandle, connection: &Connection, action: CoreAction)
     let (Some(session), Some(lobby)) = (state.session.clone(), state.lobby.clone()) else {
         return;
     };
-    if state.my_move_submitted {
+    if state.has_moved() {
         return;
     }
     let Some(game_proto) = lobby.game.as_ref() else {
@@ -505,11 +565,11 @@ fn submit_action(state: &AppHandle, connection: &Connection, action: CoreAction)
         return;
     };
     let Some(seat) = player.seat.and_then(|seat| u8::try_from(seat).ok()) else {
-        state.dispatch(AppAction::Status("You're spectating—next game".into()));
+        state.dispatch(AppAction::Status("spectating".into()));
         return;
     };
     if !is_action_legal(&game, seat, action) {
-        state.dispatch(AppAction::Status("Blocked direction—try another move or stay".into()));
+        state.dispatch(AppAction::Status("blocked".into()));
         return;
     }
     connection.send(frame(client_frame::Body::Move(v1::MoveCommand {
@@ -518,6 +578,11 @@ fn submit_action(state: &AppHandle, connection: &Connection, action: CoreAction)
         action: herdcore_protocol::action_to_proto(action) as i32,
         request_id: uuid::Uuid::new_v4().to_string(),
     })));
-    state.dispatch(AppAction::SetSubmitted(true));
-    state.dispatch(AppAction::Status("Move committed—waiting for the herd".into()));
+    // Optimistically mark our seat as moved; the scoreboard reflects it and the
+    // server's broadcast confirms it.
+    state.dispatch(AppAction::Moved {
+        game_id: lobby.game_id,
+        turn: game.turn,
+        seat: u32::from(seat),
+    });
 }

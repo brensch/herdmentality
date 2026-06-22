@@ -11,7 +11,8 @@ use crate::api::Session;
 pub struct AppState {
     pub session: Option<Session>,
     pub lobby: Option<v1::LobbySnapshot>,
-    pub my_move_submitted: bool,
+    /// Seats that have submitted for the current turn (drives the scoreboard).
+    pub moved_seats: Vec<u32>,
     pub status: String,
     pub games: Vec<v1::GameSummary>,
     pub catalogue: Vec<v1::BotKind>,
@@ -38,6 +39,17 @@ impl AppState {
             .find(|player| player.player_id == session.player_id)
             .and_then(|player| player.seat)
     }
+
+    /// Whether we have already submitted a move this turn.
+    pub fn has_moved(&self) -> bool {
+        self.my_seat()
+            .is_some_and(|seat| self.moved_seats.contains(&seat))
+    }
+
+    fn current_turn(&self) -> Option<(u64, u64)> {
+        let lobby = self.lobby.as_ref()?;
+        Some((lobby.game_id, lobby.game.as_ref()?.turn))
+    }
 }
 
 pub enum AppAction {
@@ -46,15 +58,20 @@ pub enum AppAction {
         session: Session,
         lobby: v1::LobbySnapshot,
     },
-    /// An Update frame; `reset_submitted` clears our pending move at turn edges.
+    /// An Update frame; `reset_submitted` marks a turn edge.
     ApplyEvent {
         lobby: v1::LobbySnapshot,
         reset_submitted: bool,
     },
+    /// A Moved frame: a seat submitted for `(game_id, turn)`.
+    Moved {
+        game_id: u64,
+        turn: u64,
+        seat: u32,
+    },
     SetGames(Vec<v1::GameSummary>),
     SetCatalogue(Vec<v1::BotKind>),
     Status(String),
-    SetSubmitted(bool),
     Cleared,
 }
 
@@ -65,10 +82,10 @@ impl Reducible for AppState {
         let mut next = (*self).clone();
         match action {
             AppAction::Joined { session, lobby } => {
+                next.moved_seats = lobby.submitted_seats.clone();
                 next.session = Some(session);
                 next.lobby = Some(lobby);
-                next.my_move_submitted = false;
-                next.status = "Connected".into();
+                next.status = String::new();
             }
             AppAction::ApplyEvent {
                 lobby,
@@ -76,16 +93,28 @@ impl Reducible for AppState {
             } => {
                 let current = next.lobby.as_ref().map(|l| l.public_version).unwrap_or(0);
                 if lobby.public_version >= current {
+                    // The snapshot is authoritative for who has moved this turn.
+                    next.moved_seats = lobby.submitted_seats.clone();
                     next.lobby = Some(lobby);
                 }
                 if reset_submitted {
-                    next.my_move_submitted = false;
+                    // New turn: drop any stale transient message.
+                    next.status = String::new();
+                }
+            }
+            AppAction::Moved {
+                game_id,
+                turn,
+                seat,
+            } => {
+                if next.current_turn() == Some((game_id, turn)) && !next.moved_seats.contains(&seat)
+                {
+                    next.moved_seats.push(seat);
                 }
             }
             AppAction::SetGames(games) => next.games = games,
             AppAction::SetCatalogue(catalogue) => next.catalogue = catalogue,
             AppAction::Status(message) => next.status = message,
-            AppAction::SetSubmitted(value) => next.my_move_submitted = value,
             AppAction::Cleared => next = AppState::default(),
         }
         Rc::new(next)
