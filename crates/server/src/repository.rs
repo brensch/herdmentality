@@ -429,7 +429,10 @@ impl Repository {
                 phase: v1::LobbyPhase::try_from(snapshot.phase).unwrap_or(v1::LobbyPhase::Waiting),
                 host_player_id: snapshot.host_player_id,
                 max_players: u8::try_from(snapshot.max_players)?,
-                turn_seconds: u16::try_from(snapshot.turn_seconds)?,
+                // Turn length isn't configurable per lobby, so always use the
+                // current default rather than a value persisted from an older
+                // build (which would otherwise pin old lobbies to a stale time).
+                turn_seconds: crate::app::DEFAULT_TURN_SECONDS,
                 public_version: snapshot.public_version,
                 game_id: snapshot.game_id,
                 deadline_unix_ms: snapshot.deadline_unix_ms,

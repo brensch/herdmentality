@@ -14,7 +14,7 @@ use crate::repository::Repository;
 /// Word-keyed lobbies are created with these defaults; the start screen does not
 /// expose capacity or turn length.
 const DEFAULT_MAX_PLAYERS: u8 = herdcore_core::MAX_PLAYERS;
-const DEFAULT_TURN_SECONDS: u16 = 20;
+pub const DEFAULT_TURN_SECONDS: u16 = 1;
 
 pub struct Lobby {
     pub state: Mutex<LobbyState>,

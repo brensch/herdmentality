@@ -6,23 +6,21 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
-/// LCD backlight green — the page and canvas background.
-const LCD_LIGHT: &str = "#9bbc0f";
-/// Grass field the game is played on (darker green for sprite contrast).
-const FIELD: &str = "#22401a";
-const FIELD_DOT: &str = "#2c4e1f";
-const INK: &str = "#0f380f";
-const SHEEP_LIGHT: &str = "#cfe07a";
+const LCD_LIGHT: &str = "#e8e8d0";
+const FIELD: &str = "#111a11";
+const FIELD_DOT: &str = "#182018";
+const INK: &str = "#060806";
+const SHEEP_LIGHT: &str = "#f4f4e0";
 
-/// Greens used to tell players apart while staying inside a 1-bit green palette.
-const SEAT_SHADES: [&str; 8] = [
-    "#0f380f", "#306230", "#557a14", "#83a012", "#23491a", "#638716", "#739416", "#456b16",
+/// Vivid distinct colors — one per player seat.
+pub const SEAT_COLORS: [&str; 8] = [
+    "#ff5555", "#55aaff", "#ffdd22", "#55ee77", "#ff88cc", "#33ddcc", "#ff9933", "#bb88ff",
 ];
 
 pub fn render_game(
     canvas: &HtmlCanvasElement,
     game: &GameState,
-    _my_seat: Option<u32>,
+    my_seat: Option<u32>,
 ) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window unavailable"))?;
     let viewport_width = window.inner_width()?.as_f64().unwrap_or(900.0);
@@ -64,7 +62,7 @@ pub fn render_game(
 
     // Pens, tinted by their owner's seat shade.
     for (index, player) in game.players.iter().enumerate() {
-        let shade = SEAT_SHADES[index % SEAT_SHADES.len()];
+        let shade = SEAT_COLORS[index % SEAT_COLORS.len()];
         for pos in &player.pen {
             let px = f64::from(pos.x) * cell;
             let py = f64::from(pos.y) * cell;
@@ -101,7 +99,7 @@ pub fn render_game(
     for (index, player) in game.players.iter().enumerate() {
         let px = f64::from(player.dog.x) * cell;
         let py = f64::from(player.dog.y) * cell;
-        let shade = SEAT_SHADES[index % SEAT_SHADES.len()];
+        let shade = SEAT_COLORS[index % SEAT_COLORS.len()];
         draw_sprite(&context, &DOG_SPRITE, px, py, cell, |ch| match ch {
             'B' => Some(shade),
             'D' => Some(INK),
@@ -116,6 +114,16 @@ pub fn render_game(
                 px + cell / 2.0,
                 py + cell * 0.92,
             );
+        }
+    }
+    // White ring around the local player's dog so it's unmistakable.
+    if let Some(seat) = my_seat {
+        if let Some(player) = game.players.get(seat as usize) {
+            let px = f64::from(player.dog.x) * cell;
+            let py = f64::from(player.dog.y) * cell;
+            stroke(&context, "#ffffff");
+            context.set_line_width((cell * 0.18).clamp(2.0, 5.0));
+            context.stroke_rect(px + 1.0, py + 1.0, cell - 2.0, cell - 2.0);
         }
     }
     Ok(())

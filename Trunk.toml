@@ -4,3 +4,14 @@ dist = "dist"
 
 [watch]
 ignore = ["crates/server", "crates/bot", "target", "dist"]
+
+# Bind to all interfaces so the page is reachable from the Windows host browser
+# under WSL2 (a 127.0.0.1-only bind isn't reliably forwarded).
+[serve]
+address = "0.0.0.0"
+
+# Forward the same-origin /ws connection to the local game server during
+# `trunk serve`, mirroring what Caddy does in the Docker deployment.
+[[proxy]]
+ws = true
+backend = "ws://127.0.0.1:55051/ws"

@@ -26,7 +26,7 @@ fn frame(body: client_frame::Body) -> v1::ClientFrame {
 }
 
 fn die_svg() -> Html {
-    let svg = r##"<svg class="die" viewBox="0 0 32 32" width="26" height="26" shape-rendering="crispEdges" aria-hidden="true"><polygon points="16,4 28,11 16,18 4,11" fill="#cfe07a"/><polygon points="4,11 16,18 16,29 4,22" fill="#8bac0f"/><polygon points="16,18 28,11 28,22 16,29" fill="#306230"/><rect x="15" y="10" width="2" height="2" fill="#0f380f"/><rect x="8" y="15" width="2" height="2" fill="#0f380f"/><rect x="11" y="21" width="2" height="2" fill="#0f380f"/><rect x="20" y="18" width="2" height="2" fill="#cfe07a"/><rect x="23" y="15" width="2" height="2" fill="#cfe07a"/></svg>"##;
+    let svg = r##"<svg class="die" viewBox="0 0 32 32" width="26" height="26" shape-rendering="crispEdges" aria-hidden="true"><polygon points="16,4 28,11 16,18 4,11" fill="#c8c8e8"/><polygon points="4,11 16,18 16,29 4,22" fill="#8080aa"/><polygon points="16,18 28,11 28,22 16,29" fill="#484878"/><rect x="15" y="10" width="2" height="2" fill="#0e0e18"/><rect x="8" y="15" width="2" height="2" fill="#0e0e18"/><rect x="11" y="21" width="2" height="2" fill="#0e0e18"/><rect x="20" y="18" width="2" height="2" fill="#c8c8e8"/><rect x="23" y="15" width="2" height="2" fill="#c8c8e8"/></svg>"##;
     Html::from_html_unchecked(AttrValue::from(svg))
 }
 
@@ -448,14 +448,6 @@ pub fn game_view(props: &GameProps) -> Html {
         });
     }
 
-    // Re-render every second so the move clock counts down.
-    let ticker = use_force_update();
-    use_effect_with((), move |_| {
-        let interval =
-            gloo_timers::callback::Interval::new(1000, move || ticker.force_update());
-        move || drop(interval)
-    });
-
     if !state.is_member_of(&word) {
         return html! { <JoinPanel lobby={word} /> };
     }
@@ -465,26 +457,53 @@ pub fn game_view(props: &GameProps) -> Html {
         .as_ref()
         .is_some_and(|l| l.phase == v1::LobbyPhase::Playing as i32);
     let have_seat = state.my_seat().is_some();
-    let disabled = state.has_moved() || !playing || !have_seat;
+    let moved = state.has_moved();
+    let disabled = moved || !playing || !have_seat;
+
+    // A single, unmistakable description of whether this player may act, and a
+    // matching CSS state used to recolor the whole control area.
+    let (move_state, banner_text): (&str, &str) = if !playing {
+        ("waiting", "WAITING FOR NEXT ROUND")
+    } else if !have_seat {
+        ("spectating", "SPECTATING")
+    } else if moved {
+        ("moved", "MOVE LOCKED IN — WAITING")
+    } else {
+        ("active", "YOUR TURN — MOVE NOW")
+    };
 
     let game = lobby
         .as_ref()
         .and_then(|l| l.game.as_ref())
         .and_then(|g| herdcore_protocol::game_from_proto(g).ok());
-    let deadline = lobby.as_ref().map(|l| l.deadline_unix_ms).unwrap_or(0);
-    let remaining = if playing && deadline > 0 {
-        (((deadline as f64) - js_sys::Date::now()) / 1000.0).ceil().max(0.0) as i64
+
+    // Full-width turn timer. A keyed bar that the browser drains over the turn
+    // length via CSS; keying it on the turn number restarts the drain each turn,
+    // so no per-second JS tick is needed.
+    let turn_bar = if playing {
+        let total_ms = lobby
+            .as_ref()
+            .map(|l| u64::from(l.turn_seconds).max(1) * 1000)
+            .unwrap_or(1000);
+        let turn = game.as_ref().map(|g| g.turn).unwrap_or(0);
+        html! {
+            <div id="timebar">
+                <div key={turn} class="fill" style={format!("animation-duration:{total_ms}ms")}></div>
+            </div>
+        }
     } else {
-        0
+        Html::default()
     };
 
     html! {
         <>
+            { turn_bar }
             <div id="hud">
-                { hud_view(game.as_ref(), lobby.as_ref(), &state.moved_seats, state.my_seat(), playing, remaining) }
+                { hud_view(game.as_ref(), lobby.as_ref(), &state.moved_seats, state.my_seat()) }
             </div>
             <canvas id="game" ref={canvas_ref} aria-label="Herdcore game board"></canvas>
-            <div id="controls">
+            <div id="movebar" class={move_state}>{ banner_text }</div>
+            <div id="controls" class={move_state}>
                 <button id="up" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Up)} aria-label="Up"></button>
                 <button id="left" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Left)} aria-label="Left"></button>
                 <button id="stay" disabled={disabled} onclick={action_cb(&state, &connection, CoreAction::Stay)}>{ "STAY" }</button>
@@ -495,15 +514,13 @@ pub fn game_view(props: &GameProps) -> Html {
     }
 }
 
-/// The play HUD: a move clock, sheep remaining, and a scoreboard chip per
-/// player showing a filled dot when they've moved this turn, plus their score.
+/// The play HUD: sheep remaining and a scoreboard chip per player showing a
+/// filled dot when they've moved this turn, plus their score.
 fn hud_view(
     game: Option<&herdcore_core::GameState>,
     lobby: Option<&v1::LobbySnapshot>,
     moved_seats: &[u32],
     my_seat: Option<u32>,
-    playing: bool,
-    remaining: i64,
 ) -> Html {
     let Some(game) = game else {
         return Html::default();
@@ -511,9 +528,6 @@ fn hud_view(
     html! {
         <>
             <div class="hud-line">
-                if playing {
-                    <span class="clock">{ format!("{remaining}s") }</span>
-                }
                 <span class="sheep">{ format!("{} sheep", game.sheep.len()) }</span>
             </div>
             <div class="scoreboard">
@@ -525,9 +539,20 @@ fn hud_view(
                         .and_then(|l| l.players.iter().find(|p| p.seat == Some(seat)))
                         .map(|p| p.display_name.clone())
                         .unwrap_or_else(|| format!("P{}", seat + 1));
+                    let color = render::SEAT_COLORS[seat as usize % render::SEAT_COLORS.len()];
+                    let chip_style = if you {
+                        format!("color:{color};background:{color}25;border:2px solid {color}")
+                    } else {
+                        format!("color:{color}")
+                    };
+                    let dot_style = if moved {
+                        format!("background:{color};border-color:{color}")
+                    } else {
+                        format!("border-color:{color};opacity:0.35")
+                    };
                     html! {
-                        <div class={classes!("chip", you.then_some("you"))}>
-                            <span class={classes!("dot", moved.then_some("moved"))}></span>
+                        <div class="chip" style={chip_style}>
+                            <span class="dot" style={dot_style}></span>
                             <span class="pname">{ name }</span>
                             <span class="pscore">{ player.score }</span>
                         </div>
