@@ -1,15 +1,38 @@
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use crate::{distance_to_pen, legal_actions, manhattan, step, Action, GameState, Pos, SeatId};
 
 pub const GREEDY_BOT_ID: &str = "greedy-v1";
 pub const LOOKAHEAD_BOT_ID: &str = "lookahead-v1";
 
+/// How deep the lookahead beam will go when time allows.
+const LOOKAHEAD_MAX_DEPTH: u8 = 7;
+/// Budget used when a caller doesn't supply one. Generous so direct callers and
+/// tests get the full, deterministic depth-7 search.
+const LOOKAHEAD_DEFAULT_BUDGET: Duration = Duration::from_secs(3600);
+
 /// Select the strategy advertised by a bot provider. Unknown ids retain the
 /// original greedy behaviour so an older provider remains safe to run.
 pub fn choose_action_for(state: &GameState, seat: SeatId, bot_type_id: &str) -> Action {
     match bot_type_id {
         LOOKAHEAD_BOT_ID => choose_lookahead_action(state, seat),
+        _ => choose_action(state, seat),
+    }
+}
+
+/// As [`choose_action_for`], but the lookahead strategy must return within
+/// `budget`. Critical with short turns: an unbounded depth-7 search can take
+/// many seconds for a full lobby and would miss the move deadline entirely,
+/// leaving the bot looking frozen.
+pub fn choose_action_for_within(
+    state: &GameState,
+    seat: SeatId,
+    bot_type_id: &str,
+    budget: Duration,
+) -> Action {
+    match bot_type_id {
+        LOOKAHEAD_BOT_ID => choose_lookahead_action_within(state, seat, budget),
         _ => choose_action(state, seat),
     }
 }
@@ -38,22 +61,56 @@ pub fn choose_action(state: &GameState, seat: SeatId) -> Action {
 }
 
 /// Lookahead Lucy searches possible herding sequences while predicting Greg's
-/// simultaneous move. A bounded beam keeps the work per turn predictable.
+/// simultaneous move. Uses the full depth; see [`choose_lookahead_action_within`]
+/// for a time-bounded variant.
 pub fn choose_lookahead_action(state: &GameState, seat: SeatId) -> Action {
-    let actions = legal_actions(state, seat);
-    if actions.is_empty() {
-        return Action::Stay;
-    }
+    choose_lookahead_action_within(state, seat, LOOKAHEAD_DEFAULT_BUDGET)
+}
 
-    actions
+/// Lookahead by iterative deepening under a wall-clock `budget`: it always has a
+/// complete shallow answer ready, then deepens only while time remains. This
+/// guarantees a move within the budget even on slow (debug) builds, instead of
+/// blowing past a short turn deadline and submitting nothing.
+pub fn choose_lookahead_action_within(
+    state: &GameState,
+    seat: SeatId,
+    budget: Duration,
+) -> Action {
+    let deadline = Instant::now() + budget;
+    let candidates: Vec<(GameState, Action)> = legal_actions(state, seat)
         .into_iter()
-        .filter_map(|action| {
-            let candidate = predicted_step(state, seat, action)?;
-            Some((beam_score(candidate, seat, 7), action))
-        })
-        .max_by_key(|(score, action)| (*score, std::cmp::Reverse(action_tie_break(*action))))
-        .map(|(_, action)| action)
-        .unwrap_or(Action::Stay)
+        .filter_map(|action| Some((predicted_step(state, seat, action)?, action)))
+        .collect();
+    let Some(&(_, fallback)) = candidates.first() else {
+        return Action::Stay;
+    };
+
+    let mut best = fallback;
+    for depth in 0..=LOOKAHEAD_MAX_DEPTH {
+        if Instant::now() >= deadline {
+            break;
+        }
+        // Score every first move at this depth. If any search runs out of time
+        // the level is incomplete and discarded, keeping the last full depth.
+        let level: Option<Vec<(i64, Action)>> = candidates
+            .iter()
+            .map(|(candidate, action)| {
+                beam_score(candidate.clone(), seat, depth, deadline).map(|score| (score, *action))
+            })
+            .collect();
+        match level {
+            Some(scores) => {
+                if let Some((_, action)) = scores
+                    .into_iter()
+                    .max_by_key(|(score, action)| (*score, std::cmp::Reverse(action_tie_break(*action))))
+                {
+                    best = action;
+                }
+            }
+            None => break,
+        }
+    }
+    best
 }
 
 fn predicted_step(state: &GameState, seat: SeatId, action: Action) -> Option<GameState> {
@@ -67,12 +124,22 @@ fn predicted_step(state: &GameState, seat: SeatId, action: Action) -> Option<Gam
     step(state, &actions).ok()
 }
 
-fn beam_score(initial: GameState, seat: SeatId, depth: u8) -> i64 {
+/// Beam search to `depth`, returning `None` if `deadline` passes mid-search so
+/// the caller can discard the incomplete level.
+fn beam_score(initial: GameState, seat: SeatId, depth: u8, deadline: Instant) -> Option<i64> {
     const BEAM_WIDTH: usize = 8;
     let mut beam = vec![initial];
     for _ in 0..depth {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let mut next = Vec::with_capacity(BEAM_WIDTH * 5);
         for state in std::mem::take(&mut beam) {
+            // Expanding one node (which predicts every opponent) is the costly
+            // unit, so check here to keep overshoot to a single node.
+            if Instant::now() >= deadline {
+                return None;
+            }
             if state.game_over {
                 next.push(state);
                 continue;
@@ -84,16 +151,18 @@ fn beam_score(initial: GameState, seat: SeatId, depth: u8) -> i64 {
             }
         }
         if next.is_empty() {
-            return i64::MIN;
+            return Some(i64::MIN);
         }
         next.sort_by_key(|state| std::cmp::Reverse(planning_evaluate(state, seat)));
         next.truncate(BEAM_WIDTH);
         beam = next;
     }
-    beam.into_iter()
-        .map(|state| planning_evaluate(&state, seat))
-        .max()
-        .unwrap_or(i64::MIN)
+    Some(
+        beam.into_iter()
+            .map(|state| planning_evaluate(&state, seat))
+            .max()
+            .unwrap_or(i64::MIN),
+    )
 }
 
 fn planning_evaluate(state: &GameState, seat: SeatId) -> i64 {
@@ -277,6 +346,23 @@ mod tests {
         assert_eq!(
             choose_action_for(&state, 0, GREEDY_BOT_ID),
             choose_action(&state, 0)
+        );
+    }
+
+    #[test]
+    fn lookahead_respects_a_short_budget_on_a_full_lobby() {
+        use crate::{initial_state_with_behavior, SheepBehavior};
+        // A full eight-dog lobby is the worst case; an unbounded search takes
+        // many seconds in debug. The budgeted call must return promptly so the
+        // bot never misses a short turn deadline.
+        let state = initial_state_with_behavior(MAX_PLAYERS, SheepBehavior::Skittish).unwrap();
+        let budget = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let _ = choose_lookahead_action_within(&state, 0, budget);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < budget + Duration::from_millis(400),
+            "lookahead overran its budget badly: {elapsed:?}"
         );
     }
 

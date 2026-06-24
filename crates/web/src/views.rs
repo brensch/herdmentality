@@ -237,6 +237,10 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
         });
     }
 
+    // Host's choice of flock rule for the next game. Defaults to the calmer,
+    // more ownable Skittish rule rather than the original chaos.
+    let behavior = use_state(|| herdcore_core::SheepBehavior::Skittish);
+
     if !state.is_member_of(&word) {
         return html! { <JoinPanel lobby={word} /> };
     }
@@ -255,9 +259,16 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
 
     let on_start = {
         let connection = connection.clone();
+        let behavior = behavior.clone();
         Callback::from(move |_: MouseEvent| {
-            connection.send(frame(client_frame::Body::Start(v1::StartCommand {})));
+            connection.send(frame(client_frame::Body::Start(v1::StartCommand {
+                sheep_behavior: behavior.id().to_owned(),
+            })));
         })
+    };
+    let on_pick_behavior = {
+        let behavior = behavior.clone();
+        Callback::from(move |picked: herdcore_core::SheepBehavior| behavior.set(picked))
     };
     let on_remove_bot = {
         let connection = connection.clone();
@@ -282,6 +293,9 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
             <div class="games">{ games_list(&state.games, &lobby) }</div>
 
             if can_manage {
+                <div class="section-label">{ "SHEEP BEHAVIOUR" }</div>
+                <div class="behavior-row">{ behavior_picker(*behavior, on_pick_behavior) }</div>
+                <div class="hint">{ behavior.description() }</div>
                 <div class="bot-row">{ bot_buttons(&state.catalogue, &connection) }</div>
                 <div class="start-row">
                     <button onclick={on_start}>{ start_label }</button>
@@ -290,6 +304,21 @@ pub fn lobby_view(props: &LobbyProps) -> Html {
                 <div class="hint">{ "Waiting for the host to start…" }</div>
             }
         </section>
+    }
+}
+
+/// One button per flock rule; the active one is highlighted.
+fn behavior_picker(
+    selected: herdcore_core::SheepBehavior,
+    on_pick: Callback<herdcore_core::SheepBehavior>,
+) -> Html {
+    html! {
+        { for herdcore_core::SheepBehavior::ALL.into_iter().map(|behavior| {
+            let on_pick = on_pick.clone();
+            let onclick = Callback::from(move |_: MouseEvent| on_pick.emit(behavior));
+            let class = classes!("behavior-btn", (behavior == selected).then_some("selected"));
+            html! { <button {class} title={behavior.description()} {onclick}>{ behavior.label() }</button> }
+        }) }
     }
 }
 
@@ -529,6 +558,7 @@ fn hud_view(
         <>
             <div class="hud-line">
                 <span class="sheep">{ format!("{} sheep", game.sheep.len()) }</span>
+                <span class="behavior-tag">{ game.sheep_behavior.label() }</span>
             </div>
             <div class="scoreboard">
                 { for game.players.iter().map(|player| {

@@ -61,6 +61,7 @@ message GameState {
   repeated Position rocks = 9;
   bool game_over = 10;
   repeated uint32 winners = 11;
+  string sheep_behavior = 12; // stable id, e.g. "classic"; empty => default
 }
 
 message LobbyPlayer {
@@ -174,7 +175,9 @@ message MoveCommand {
   string request_id = 4;
 }
 
-message StartCommand {}
+message StartCommand {
+  string sheep_behavior = 1; // chosen flock rule id; empty => default
+}
 
 message AddBotCommand {
   string display_name = 1;

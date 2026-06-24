@@ -37,6 +37,64 @@ impl Action {
     ];
 }
 
+/// How the flock reacts to dogs each turn. Chosen per game and stored in
+/// [`GameState`], so every simulation — the server's authoritative step and the
+/// bots' lookahead clones alike — applies the same rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SheepBehavior {
+    /// The original flock: every sheep flees whichever dog is nearest, from
+    /// anywhere on the board, every single turn.
+    #[default]
+    Classic,
+    /// Calm and local: a sheep only reacts to a dog within close range, fleeing
+    /// that one dog; with no dog near it simply grazes in place.
+    Skittish,
+    /// Herd animals: sheep flee nearby dogs but also pull toward one another, so
+    /// the flock clumps and drifts as a single mass.
+    Flocking,
+    /// Hard to spook: a sheep holds its ground until a dog is right beside it.
+    Lazy,
+}
+
+impl SheepBehavior {
+    pub const ALL: [SheepBehavior; 4] =
+        [Self::Classic, Self::Skittish, Self::Flocking, Self::Lazy];
+
+    /// Stable identifier used on the wire and to round-trip the UI selection.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Skittish => "skittish",
+            Self::Flocking => "flocking",
+            Self::Lazy => "lazy",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|behavior| behavior.id() == id)
+    }
+
+    /// Short display name for the picker and HUD.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Skittish => "Skittish",
+            Self::Flocking => "Flocking",
+            Self::Lazy => "Lazy",
+        }
+    }
+
+    /// One-line explanation shown alongside the picker.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Classic => "Every sheep flees the nearest dog from anywhere. The original chaos.",
+            Self::Skittish => "Sheep only react to close dogs, grazing otherwise. Calm and easy to herd.",
+            Self::Flocking => "Sheep stick together and move as one. Push the flock, not individuals.",
+            Self::Lazy => "Sheep barely budge until a dog is right beside them. Slow and deliberate.",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayerState {
     pub seat: SeatId,
@@ -57,6 +115,7 @@ pub struct GameState {
     pub rocks: Vec<Pos>,
     pub game_over: bool,
     pub winners: Vec<SeatId>,
+    pub sheep_behavior: SheepBehavior,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +130,13 @@ pub fn initial_state() -> GameState {
 }
 
 pub fn initial_state_for_players(player_count: u8) -> Result<GameState, RuleError> {
+    initial_state_with_behavior(player_count, SheepBehavior::default())
+}
+
+pub fn initial_state_with_behavior(
+    player_count: u8,
+    sheep_behavior: SheepBehavior,
+) -> Result<GameState, RuleError> {
     if !(MIN_PLAYERS..=MAX_PLAYERS).contains(&player_count) {
         return Err(RuleError::InvalidPlayerCount);
     }
@@ -102,6 +168,7 @@ pub fn initial_state_for_players(player_count: u8) -> Result<GameState, RuleErro
         rocks: Vec::new(),
         game_over: false,
         winners: Vec::new(),
+        sheep_behavior,
     })
 }
 
@@ -267,15 +334,59 @@ fn resolve_dogs(state: &GameState, actions: &[Action]) -> Vec<Pos> {
         .collect()
 }
 
+/// A dog within this many tiles spooks a Skittish sheep; beyond it, the sheep
+/// grazes. Small enough that distant dogs no longer creep the whole flock into
+/// the corners — the chief complaint with the Classic rule.
+const SKITTISH_RADIUS: i16 = 6;
+/// A Lazy sheep only bolts when a dog is essentially on top of it.
+const LAZY_RADIUS: i16 = 2;
+/// Flocking: how far a sheep looks for neighbours to cohere with, and the dog
+/// range that still triggers a flee.
+const FLOCK_NEIGHBOUR_RADIUS: i16 = 5;
+const FLOCK_DOG_RADIUS: i16 = 6;
+
+/// Resolve every sheep's next position: the chosen behaviour decides each
+/// sheep's desired cell, then shared collision handling stops two sheep from
+/// landing on the same tile.
 fn resolve_sheep(state: &GameState, dogs: &[Pos]) -> Vec<Pos> {
+    let desired: Vec<Pos> = match state.sheep_behavior {
+        SheepBehavior::Classic => desired_classic(state, dogs),
+        SheepBehavior::Skittish => desired_flee_nearest(state, dogs, SKITTISH_RADIUS),
+        SheepBehavior::Lazy => desired_flee_nearest(state, dogs, LAZY_RADIUS),
+        SheepBehavior::Flocking => desired_flocking(state, dogs),
+    };
+    resolve_sheep_collisions(state, desired)
+}
+
+/// Two sheep that pick the same tile both stay put.
+fn resolve_sheep_collisions(state: &GameState, desired: Vec<Pos>) -> Vec<Pos> {
+    let mut counts = BTreeMap::new();
+    for destination in &desired {
+        *counts.entry(*destination).or_insert(0usize) += 1;
+    }
+    desired
+        .into_iter()
+        .enumerate()
+        .map(|(index, destination)| {
+            if counts[&destination] > 1 {
+                state.sheep[index]
+            } else {
+                destination
+            }
+        })
+        .collect()
+}
+
+/// Classic: maximise distance to the nearest dog anywhere on the board, with a
+/// tie-break order that rotates by turn. The original, board-wide reaction.
+fn desired_classic(state: &GameState, dogs: &[Pos]) -> Vec<Pos> {
     let tie_break_order = sheep_action_order(state.turn);
-    let desired: Vec<Pos> = state
+    state
         .sheep
         .iter()
         .map(|sheep| {
             let mut best_position = *sheep;
             let mut best_distance = i16::MIN;
-
             for action in tie_break_order {
                 let candidate = moved(*sheep, action);
                 if !is_legal_sheep_candidate(state, *sheep, candidate, dogs) {
@@ -293,23 +404,120 @@ fn resolve_sheep(state: &GameState, dogs: &[Pos]) -> Vec<Pos> {
             }
             best_position
         })
-        .collect();
+        .collect()
+}
 
-    let mut counts = BTreeMap::new();
-    for destination in &desired {
-        *counts.entry(*destination).or_insert(0usize) += 1;
-    }
-    desired
-        .into_iter()
-        .enumerate()
-        .map(|(index, destination)| {
-            if counts[&destination] > 1 {
-                state.sheep[index]
-            } else {
-                destination
+/// Skittish / Lazy: react only to the single nearest dog, and only when it is
+/// within `radius`. Otherwise the sheep grazes in place, so distant dogs exert
+/// no pull and the flock no longer funnels into the corners.
+fn desired_flee_nearest(state: &GameState, dogs: &[Pos], radius: i16) -> Vec<Pos> {
+    state
+        .sheep
+        .iter()
+        .map(|sheep| {
+            let Some((threat, distance)) = nearest_dog(*sheep, dogs) else {
+                return *sheep;
+            };
+            if distance > radius {
+                return *sheep;
             }
+            // Squared Euclidean, not Manhattan: a dog directly to one side should
+            // push the sheep straight away from it. Under Manhattan, fleeing
+            // straight back ties with sliding sideways, so cardinal pushes failed.
+            best_sheep_cell(state, *sheep, dogs, |candidate| dist_sq(candidate, threat))
         })
         .collect()
+}
+
+/// Flocking: flee a nearby dog while also pulling toward the centroid of nearby
+/// sheep, so the flock holds together and shoves as a single body.
+fn desired_flocking(state: &GameState, dogs: &[Pos]) -> Vec<Pos> {
+    const FLEE_WEIGHT: i32 = 10;
+    const COHESION_WEIGHT: i32 = 3;
+    state
+        .sheep
+        .iter()
+        .map(|sheep| {
+            let threat = nearest_dog(*sheep, dogs)
+                .filter(|(_, distance)| *distance <= FLOCK_DOG_RADIUS)
+                .map(|(dog, _)| dog);
+            let centroid = flock_centroid(state, *sheep);
+            // With nothing pressuring or attracting it, a lone sheep grazes.
+            if threat.is_none() && centroid.is_none() {
+                return *sheep;
+            }
+            best_sheep_cell(state, *sheep, dogs, |candidate| {
+                let flee = threat.map_or(0, |dog| FLEE_WEIGHT * dist_sq(candidate, dog));
+                let cohere = centroid.map_or(0, |c| -COHESION_WEIGHT * dist_sq(candidate, c));
+                flee + cohere
+            })
+        })
+        .collect()
+}
+
+/// Average position of the other sheep within [`FLOCK_NEIGHBOUR_RADIUS`].
+fn flock_centroid(state: &GameState, sheep: Pos) -> Option<Pos> {
+    let mut count = 0i32;
+    let (mut sx, mut sy) = (0i32, 0i32);
+    for other in &state.sheep {
+        if *other != sheep && manhattan(sheep, *other) <= FLOCK_NEIGHBOUR_RADIUS {
+            count += 1;
+            sx += i32::from(other.x);
+            sy += i32::from(other.y);
+        }
+    }
+    (count > 0).then(|| Pos::new((sx / count) as i8, (sy / count) as i8))
+}
+
+fn nearest_dog(sheep: Pos, dogs: &[Pos]) -> Option<(Pos, i16)> {
+    dogs.iter()
+        .map(|dog| (*dog, manhattan(sheep, *dog)))
+        .min_by_key(|(_, distance)| *distance)
+}
+
+/// Squared Euclidean distance. Used for fleeing so a sheep moves *directly* away
+/// from a threat rather than treating a perpendicular step as just as good.
+fn dist_sq(a: Pos, b: Pos) -> i32 {
+    let dx = i32::from(a.x) - i32::from(b.x);
+    let dy = i32::from(a.y) - i32::from(b.y);
+    dx * dx + dy * dy
+}
+
+/// Pick the legal cell that maximises `score`, breaking ties deterministically
+/// with a preference for holding still (no turn-dependent jitter). Staying is
+/// always legal, so this always returns a valid cell.
+fn best_sheep_cell<F: Fn(Pos) -> i32>(
+    state: &GameState,
+    sheep: Pos,
+    dogs: &[Pos],
+    score: F,
+) -> Pos {
+    let mut best = sheep;
+    let mut best_key = (i32::MIN, 0u8);
+    for action in Action::ALL {
+        let candidate = moved(sheep, action);
+        if !is_legal_sheep_candidate(state, sheep, candidate, dogs) {
+            continue;
+        }
+        let key = (score(candidate), sheep_tie_rank(action));
+        if key > best_key {
+            best_key = key;
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// Higher wins ties; staying is preferred so a sheep only moves when it strictly
+/// helps, which keeps the flock from twitching between equal options.
+fn sheep_tie_rank(action: Action) -> u8 {
+    match action {
+        Action::Stay => 5,
+        Action::Up => 4,
+        Action::Right => 3,
+        Action::Down => 2,
+        Action::Left => 1,
+    }
 }
 
 fn is_legal_sheep_candidate(state: &GameState, sheep: Pos, candidate: Pos, dogs: &[Pos]) -> bool {
@@ -601,6 +809,67 @@ mod tests {
         let actions = BTreeMap::from([(0, Action::Up), (1, Action::Up)]);
         let next = step(&state, &actions).unwrap();
         assert_eq!(next.sheep, vec![Pos::new(4, 3)]);
+    }
+
+    #[test]
+    fn skittish_sheep_ignore_a_distant_dog() {
+        let mut state = initial_state_with_behavior(2, SheepBehavior::Skittish).unwrap();
+        state.players[0].dog = Pos::new(0, 0);
+        state.players[1].dog = Pos::new(40, 40);
+        // A sheep far from every dog should graze rather than creep away.
+        state.sheep = vec![Pos::new(20, 20)];
+        let next = step(&state, &BTreeMap::new()).unwrap();
+        assert_eq!(next.sheep, vec![Pos::new(20, 20)]);
+    }
+
+    #[test]
+    fn skittish_sheep_flee_a_close_dog() {
+        let mut state = initial_state_with_behavior(2, SheepBehavior::Skittish).unwrap();
+        state.players[0].dog = Pos::new(20, 21);
+        state.players[1].dog = Pos::new(40, 40);
+        state.sheep = vec![Pos::new(20, 20)];
+        let next = step(&state, &BTreeMap::from([(0, Action::Stay), (1, Action::Stay)])).unwrap();
+        // The dog is directly below, so the sheep steps up, away from it.
+        assert_eq!(next.sheep, vec![Pos::new(20, 19)]);
+    }
+
+    #[test]
+    fn skittish_sheep_can_be_pushed_in_every_cardinal_direction() {
+        // Dog adjacent on one side must push the sheep straight to the opposite
+        // side — the bug the squared-distance flee fixes.
+        let cases = [
+            (Pos::new(19, 20), Pos::new(21, 20)), // dog left  -> sheep right
+            (Pos::new(21, 20), Pos::new(19, 20)), // dog right -> sheep left
+            (Pos::new(20, 19), Pos::new(20, 21)), // dog above -> sheep down
+            (Pos::new(20, 21), Pos::new(20, 19)), // dog below -> sheep up
+        ];
+        for (dog, expected) in cases {
+            let mut state = initial_state_with_behavior(2, SheepBehavior::Skittish).unwrap();
+            state.players[0].dog = dog;
+            state.players[1].dog = Pos::new(0, 0);
+            state.sheep = vec![Pos::new(20, 20)];
+            let next =
+                step(&state, &BTreeMap::from([(0, Action::Stay), (1, Action::Stay)])).unwrap();
+            assert_eq!(next.sheep, vec![expected], "dog at {dog:?}");
+        }
+    }
+
+    #[test]
+    fn lazy_sheep_ignore_a_dog_a_few_tiles_away() {
+        let mut state = initial_state_with_behavior(2, SheepBehavior::Lazy).unwrap();
+        state.players[0].dog = Pos::new(20, 24); // 4 tiles away: outside LAZY_RADIUS
+        state.players[1].dog = Pos::new(40, 40);
+        state.sheep = vec![Pos::new(20, 20)];
+        let next = step(&state, &BTreeMap::new()).unwrap();
+        assert_eq!(next.sheep, vec![Pos::new(20, 20)]);
+    }
+
+    #[test]
+    fn behavior_round_trips_through_id() {
+        for behavior in SheepBehavior::ALL {
+            assert_eq!(SheepBehavior::from_id(behavior.id()), Some(behavior));
+        }
+        assert_eq!(SheepBehavior::from_id("nope"), None);
     }
 
     #[test]

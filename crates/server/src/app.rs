@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use herdcore_core::{initial_state_for_players, is_action_legal, step, Action};
+use herdcore_core::{is_action_legal, step, Action};
 use herdcore_protocol::{action_to_proto, v1};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use uuid::Uuid;
@@ -271,6 +271,7 @@ impl App {
         lobby_id: &str,
         player_id: &str,
         token: &str,
+        sheep_behavior: herdcore_core::SheepBehavior,
     ) -> Result<v1::LobbySnapshot> {
         let lobby = self.lobby(lobby_id).await?;
         let mut state = lobby.state.lock().await;
@@ -290,7 +291,7 @@ impl App {
             player.seat = Some(seat as u8);
         }
         state.game = Some(
-            initial_state_for_players(state.players.len() as u8)
+            herdcore_core::initial_state_with_behavior(state.players.len() as u8, sheep_behavior)
                 .map_err(|_| anyhow::anyhow!("invalid player count"))?,
         );
         state.phase = v1::LobbyPhase::Playing;
@@ -742,7 +743,12 @@ mod tests {
             .await
             .unwrap();
         let started = app
-            .start_game(&created.lobby_id, &alice.player_id, &alice.session_token)
+            .start_game(
+                &created.lobby_id,
+                &alice.player_id,
+                &alice.session_token,
+                herdcore_core::SheepBehavior::default(),
+            )
             .await
             .unwrap();
         let _ = events.recv().await.unwrap();
@@ -912,7 +918,12 @@ mod tests {
             .is_err());
 
         let started = app
-            .start_game(&lobby.lobby_id, &host.player_id, &host.session_token)
+            .start_game(
+                &lobby.lobby_id,
+                &host.player_id,
+                &host.session_token,
+                herdcore_core::SheepBehavior::default(),
+            )
             .await
             .unwrap();
         assert_eq!(started.phase, v1::LobbyPhase::Playing as i32);
@@ -968,9 +979,14 @@ mod tests {
         app.join_or_create_lobby("history-room", "Bob".to_owned())
             .await
             .unwrap();
-        app.start_game(&lobby.lobby_id, &host.player_id, &host.session_token)
-            .await
-            .unwrap();
+        app.start_game(
+            &lobby.lobby_id,
+            &host.player_id,
+            &host.session_token,
+            herdcore_core::SheepBehavior::default(),
+        )
+        .await
+        .unwrap();
 
         let games = app
             .list_games(&lobby.lobby_id, &host.player_id, &host.session_token)
@@ -991,9 +1007,14 @@ mod tests {
         app.join_or_create_lobby("wiggly-sheep", "Bob".to_owned())
             .await
             .unwrap();
-        app.start_game(&lobby.lobby_id, &alice.player_id, &alice.session_token)
-            .await
-            .unwrap();
+        app.start_game(
+            &lobby.lobby_id,
+            &alice.player_id,
+            &alice.session_token,
+            herdcore_core::SheepBehavior::default(),
+        )
+        .await
+        .unwrap();
 
         let (cara, snapshot) = app
             .join_or_create_lobby("wiggly-sheep", "Cara".to_owned())

@@ -335,10 +335,12 @@ async fn handle_command(
                 let _ = send(socket, error_frame(&error.to_string(), false)).await;
             }
         }
-        Some(client_frame::Body::Start(_)) => {
+        Some(client_frame::Body::Start(command)) => {
+            let behavior = herdcore_core::SheepBehavior::from_id(&command.sheep_behavior)
+                .unwrap_or_default();
             if let Err(error) = state
                 .app
-                .start_game(&session.lobby_id, &session.player_id, &session.token)
+                .start_game(&session.lobby_id, &session.player_id, &session.token, behavior)
                 .await
             {
                 let _ = send(socket, error_frame(&error.to_string(), false)).await;

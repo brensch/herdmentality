@@ -504,11 +504,11 @@ mod tests {
         let mut pending = Vec::new();
         enqueue(
             &mut pending,
-            client(client_frame::Body::Start(v1::StartCommand {})),
+            client(client_frame::Body::Start(v1::StartCommand { sheep_behavior: String::new() })),
         );
         enqueue(
             &mut pending,
-            client(client_frame::Body::Start(v1::StartCommand {})),
+            client(client_frame::Body::Start(v1::StartCommand { sheep_behavior: String::new() })),
         );
         enqueue(
             &mut pending,

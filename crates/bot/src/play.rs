@@ -97,7 +97,22 @@ async fn play_once(
         }
         acted = Some(turn_key);
 
-        let action = bot::choose_action_for(&game, seat, bot_type_id);
+        // Decide within the turn: spend most of the time left before the
+        // deadline, leaving headroom for the round trip. Without this a deep
+        // search can overrun a short turn and the move is never counted.
+        let budget = move_budget(lobby.deadline_unix_ms);
+        let mut action = bot::choose_action_for_within(&game, seat, bot_type_id, budget);
+        // Keep bots lively: never sit still when a real move is available. If the
+        // strategy decides to stay, jump in a random legal direction instead.
+        if action == herdcore_core::Action::Stay {
+            let mut moves: Vec<_> = herdcore_core::legal_actions(&game, seat)
+                .into_iter()
+                .filter(|candidate| *candidate != herdcore_core::Action::Stay)
+                .collect();
+            if !moves.is_empty() {
+                action = moves.swap_remove(random_index(moves.len()));
+            }
+        }
         tracing::trace!(
             player = %player_id,
             lobby = %lobby_id,
@@ -115,6 +130,28 @@ async fn play_once(
             .await;
     }
     Ok(Outcome::Reconnect)
+}
+
+/// A cheap, dependency-free random index in `0..len`, seeded from the clock.
+/// Good enough for picking a fallback direction; not security-sensitive.
+fn random_index(len: usize) -> usize {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    nanos as usize % len
+}
+
+/// Time to spend choosing a move: 60% of the time left until the deadline,
+/// clamped so we always think a little but never risk missing the turn.
+fn move_budget(deadline_unix_ms: i64) -> std::time::Duration {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let remaining = (deadline_unix_ms - now_ms).max(0);
+    let budget = (remaining * 6 / 10).clamp(50, 5_000);
+    std::time::Duration::from_millis(budget as u64)
 }
 
 fn resume(lobby_id: &str, player_id: &str, token: &str) -> v1::ClientFrame {

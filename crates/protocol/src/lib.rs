@@ -81,6 +81,7 @@ pub fn game_to_proto(state: &core::GameState) -> v1::GameState {
         rocks: state.rocks.iter().copied().map(pos_to_proto).collect(),
         game_over: state.game_over,
         winners: state.winners.iter().map(|seat| u32::from(*seat)).collect(),
+        sheep_behavior: state.sheep_behavior.id().to_owned(),
     }
 }
 
@@ -125,6 +126,9 @@ pub fn game_from_proto(state: &v1::GameState) -> Result<core::GameState, &'stati
             .iter()
             .map(|seat| u8::try_from(*seat).map_err(|_| "winner"))
             .collect::<Result<_, _>>()?,
+        // Unknown/empty ids fall back to the default rule so older snapshots and
+        // newer clients stay compatible.
+        sheep_behavior: core::SheepBehavior::from_id(&state.sheep_behavior).unwrap_or_default(),
     })
 }
 

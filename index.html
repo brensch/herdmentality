@@ -244,6 +244,28 @@
         background: var(--accent);
         color: var(--bg);
       }
+      /* Flock-rule picker: one button per behaviour, active one highlighted. */
+      .behavior-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .behavior-btn {
+        flex: 1 1 auto;
+        background: var(--surface-dim);
+        color: var(--text);
+        font-size: 10px;
+      }
+      .behavior-btn.selected {
+        background: var(--accent);
+        color: var(--bg);
+        border-color: var(--accent);
+      }
+      .behavior-tag {
+        color: var(--accent);
+        letter-spacing: 1px;
+      }
       /* Start / Play Again on its own line at the bottom. */
       .start-row {
         margin-top: 12px;
